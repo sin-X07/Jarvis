@@ -1,0 +1,1 @@
+{"servers":{"filesystem":{"args":["-y","@modelcontextprotocol/server-filesystem","D:\\BJTU\\Personal agent\\jarvis-agent-starter"],"command":"npx","env":{}},"github":{"args":["-y","@modelcontextprotocol/server-github"],"command":"npx","env":{"GITHUB_PERSONAL_ACCESS_TOKEN":"在这里填你的 GitHub token"}}}}

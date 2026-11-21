@@ -109,7 +109,8 @@ def test_memory_tools():
         assert funcs["remember_fact"](fact="用户不吃辣") == "记住了：用户不吃辣"
         assert "不吃辣" in funcs["recall_facts"](query="吃辣吗")
         assert "没找到" in funcs["recall_facts"](query="毫不相关")
-        assert {s["function"]["name"] for s in schemas} == {"remember_fact", "recall_facts"}
+        assert {s["function"]["name"] for s in schemas} == {
+        "remember_fact", "recall_facts", "delete_fact", "update_fact"}
     print("[OK] 记忆工具：remember_fact / recall_facts 可被模型调用")
 
 

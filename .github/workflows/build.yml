@@ -1,0 +1,32 @@
+name: Build Windows exe
+
+# 打 tag（比如 v0.2.0）就自动在 Windows 上打包，两个 exe 挂到 release 上。
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: python-version
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-gui.txt
+          python -m pip install pyinstaller
+      - name: 打包
+        run: pyinstaller --noconfirm --clean jarvis.spec
+      - name: 上传到 release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            python-version/dist/jarvis.exe
+            python-version/dist/jarvis-gui.exe

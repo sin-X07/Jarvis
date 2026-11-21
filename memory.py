@@ -135,6 +135,30 @@ class FactStore:
         self._save()
         return f"记住了：{text}"
 
+    def delete(self, text: str) -> str:
+        """删一条事实：按全文精确匹配，没找到就明说。"""
+        text = text.strip()
+        before = len(self.facts)
+        self.facts = [f for f in self.facts if f["text"] != text]
+        if len(self.facts) == before:
+            return f"没找到这条事实：{text}"
+        self._save()
+        return f"已忘记：{text}"
+
+    def update(self, old_text: str, new_text: str) -> str:
+        """改一条事实：旧内容换成新内容，时间戳刷新。"""
+        old_text, new_text = old_text.strip(), new_text.strip()
+        if not new_text:
+            return "新内容是空的，没改。"
+        for fact in self.facts:
+            if fact["text"] == old_text:
+                fact["text"] = new_text
+                fact["created_at"] = datetime.datetime.now().strftime(
+                    "%Y-%m-%d %H:%M:%S")
+                self._save()
+                return f"已更新：{old_text} → {new_text}"
+        return f"没找到这条事实：{old_text}"
+
     def search(self, query: str, top_k: int = 5) -> list:
         """按 bigram 重合度给事实打分，返回最相关的 top_k 条。"""
         query_bigrams = _bigrams(query)
@@ -155,11 +179,24 @@ class FactStore:
     def all_texts(self) -> list:
         return [f["text"] for f in self.facts]
 
-    def render_for_prompt(self) -> str:
-        """拼进 system prompt 的一段话。没有事实时返回空字符串。"""
+    def render_for_prompt(self, query: str | None = None) -> str:
+        """拼进 system prompt 的一段话。没有事实时返回空字符串。
+
+        事实不多（≤10 条）时全量拼；多了以后只拼相关的：有 query 就
+        按 query 检索 top 5，没 query 就拼最近的 10 条。prompt 里
+        不塞用不上的事实，省上下文。
+        """
         if not self.facts:
             return ""
-        lines = "\n".join(f"- {text}" for text in self.all_texts())
+        if len(self.facts) <= 10:
+            texts = self.all_texts()
+        elif query:
+            texts = self.search(query, top_k=5)
+        else:
+            texts = self.all_texts()[-10:]
+        if not texts:
+            return ""
+        lines = "\n".join(f"- {text}" for text in texts)
         return f"以下是你长期记忆中关于用户的事实，回答时可以参考：\n{lines}"
 
     def _save(self) -> None:
@@ -197,6 +234,14 @@ def memory_tools(store: FactStore):
             return "长期记忆里没找到相关的事实。"
         return "\n".join(f"- {text}" for text in hits)
 
+    def delete_fact(fact: str) -> str:
+        """从长期记忆里删一条事实（全文匹配）。"""
+        return store.delete(fact)
+
+    def update_fact(old_fact: str, new_fact: str) -> str:
+        """把长期记忆里的一条事实改成新内容。"""
+        return store.update(old_fact, new_fact)
+
     schemas = [
         {
             "type": "function",
@@ -232,8 +277,48 @@ def memory_tools(store: FactStore):
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "delete_fact",
+                "description": "从长期记忆里删除一条事实。用户说“忘了这个”“别再记这个”时调用，要传事实的完整原文。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "fact": {
+                            "type": "string",
+                            "description": "要删除的事实原文",
+                        }
+                    },
+                    "required": ["fact"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "update_fact",
+                "description": "修改长期记忆里的一条事实。用户纠正之前记住的内容时调用。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "old_fact": {
+                            "type": "string",
+                            "description": "要修改的事实原文",
+                        },
+                        "new_fact": {
+                            "type": "string",
+                            "description": "改成的新内容",
+                        },
+                    },
+                    "required": ["old_fact", "new_fact"],
+                },
+            },
+        },
     ]
     return schemas, {
         "remember_fact": remember_fact,
         "recall_facts": recall_facts,
+        "delete_fact": delete_fact,
+        "update_fact": update_fact,
     }
