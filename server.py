@@ -15,9 +15,17 @@ request; the server merges them, runs one agent loop, and returns the
 updated history/facts in the final `done` event. That is what makes this
 deployable on stateless serverless (Vercel): no session to lose, and the
 long-term facts survive cold starts because the browser re-seeds them.
+
+Key (BYOK): the server has no key of its own on Vercel. Each visitor
+types their own DeepSeek API key into the page; the browser keeps it in
+localStorage and sends it with every request. The server uses that key
+for the one request only -- it is never stored, cached or logged. With
+no key in the request, the server falls back to DEEPSEEK_API_KEY from
+the environment (handy for local dev); with neither, it answers 400.
 """
 
 import json
+import os
 import queue
 import threading
 
@@ -42,8 +50,12 @@ STORE = FactStore()
 _client = None
 
 
-def get_client():
-    """Lazy client: no API key -> fail the request, not the import."""
+def get_client(api_key=None):
+    """Client for one request. A caller-provided key wins (BYOK) and is
+    never cached: it lives only for this request. Otherwise fall back to
+    the cached client built from DEEPSEEK_API_KEY (local dev)."""
+    if api_key:
+        return build_client(api_key=api_key)
     global _client
     if _client is None:
         _client = build_client()
@@ -54,6 +66,7 @@ class ChatRequest(BaseModel):
     message: str
     history: list = []  # 浏览器攒的对话：user/assistant/tool 消息，不含 system
     facts: list = []    # 浏览器 localStorage 里的长期事实
+    api_key: str = ""   # 访客自己的 DeepSeek key：只用本轮请求，不存不记日志
 
 
 def _system_prompt() -> str:
@@ -143,11 +156,23 @@ INDEX_HTML = """<!DOCTYPE html>
            cursor: pointer; }
   button:disabled { background: #45475a; color: #a6adc8; cursor: default; }
   #clear { background: none; color: #a6adc8; padding: 10px 8px; }
+  #keybar { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
+  #key { flex: 1; background: #181825; color: #cdd6f4;
+         border: 1px solid #313244; border-radius: 8px; padding: 8px;
+         font: inherit; }
+  #keybar button { padding: 8px 12px; }
+  #keystatus { color: #a6adc8; font-size: 13px; white-space: nowrap; }
 </style>
 </head>
 <body>
 <div id="app">
   <header><h1>Jarvis</h1><span id="status">就绪</span></header>
+  <div id="keybar">
+    <input id="key" type="password" placeholder="你的 DeepSeek API key（sk-…），只存在你的浏览器里" autocomplete="off">
+    <button id="savekey">保存</button>
+    <button id="clearkey" title="清除浏览器里存的 key">清除</button>
+    <span id="keystatus"></span>
+  </div>
   <div id="chat"></div>
   <div id="row">
     <input id="input" placeholder="和 Jarvis 说点什么…（回车发送）" autocomplete="off">
@@ -160,10 +185,32 @@ const chatEl = document.getElementById('chat');
 const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('send');
 const statusEl = document.getElementById('status');
+const keyEl = document.getElementById('key');
+const keyStatusEl = document.getElementById('keystatus');
 
 // 浏览器是状态的家：历史和长期事实存在 localStorage，每次请求一起发过去。
 let history = JSON.parse(localStorage.getItem('jarvis-history') || '[]');
 let facts = JSON.parse(localStorage.getItem('jarvis-facts') || '[]');
+// API key 也只存在浏览器本地：每次请求发给服务器调 DeepSeek 用，服务器不保存它。
+let apiKey = localStorage.getItem('jarvis-api-key') || '';
+function refreshKeyUI() {
+  keyEl.value = apiKey;
+  keyStatusEl.textContent = apiKey ? 'key 已保存（仅本浏览器）' : '未填 key';
+}
+refreshKeyUI();
+document.getElementById('savekey').addEventListener('click', () => {
+  apiKey = keyEl.value.trim();
+  if (apiKey) localStorage.setItem('jarvis-api-key', apiKey);
+  else localStorage.removeItem('jarvis-api-key');
+  refreshKeyUI();
+  statusEl.textContent = apiKey ? 'key 已保存' : 'key 已清除';
+});
+document.getElementById('clearkey').addEventListener('click', () => {
+  apiKey = '';
+  localStorage.removeItem('jarvis-api-key');
+  refreshKeyUI();
+  statusEl.textContent = 'key 已清除';
+});
 let busy = false;
 
 function save() {
@@ -185,7 +232,10 @@ history.forEach(m => {
   if (m.role === 'user') addMsg('user', m.content);
   else if (m.role === 'assistant' && m.content) addMsg('jarvis', m.content);
 });
-if (!history.length) addMsg('jarvis', 'Jarvis 已启动。直接说话，或者先记住点什么：“记住，我最喜欢蓝色”。');
+if (!history.length) {
+  addMsg('jarvis', 'Jarvis 已启动。直接说话，或者先记住点什么：“记住，我最喜欢蓝色”。');
+  if (!apiKey) addMsg('jarvis', '先在上方填入你的 DeepSeek API key 再开始（key 只存在你的浏览器里）。');
+}
 
 function setBusy(b) {
   busy = b;
@@ -208,7 +258,7 @@ async function send() {
     const resp = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text, history, facts }),
+      body: JSON.stringify({ message: text, history, facts, api_key: apiKey }),
     });
     if (!resp.ok) {
       const detail = await resp.json().catch(() => ({}));
@@ -257,6 +307,7 @@ async function send() {
   } catch (err) {
     addMsg('error', '出错了：' + err.message);
     statusEl.textContent = '出错';
+    if (err.message.includes('API key')) keyEl.focus();
   } finally {
     setBusy(false);
   }
@@ -291,8 +342,15 @@ def health():
 def chat(req: ChatRequest):
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="message 不能为空")
+    api_key = (req.api_key or "").strip()
+    if not api_key and not os.getenv("DEEPSEEK_API_KEY"):
+        raise HTTPException(
+            status_code=400,
+            detail="请先在页面上方填写你的 DeepSeek API key。key 只存在你的浏览器本地，"
+                   "每次请求发给服务器调 DeepSeek 用，服务器不保存它。",
+        )
     try:
-        client = get_client()
+        client = get_client(api_key or None)
     except SystemExit as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

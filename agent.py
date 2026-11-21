@@ -41,8 +41,10 @@ SYSTEM_PROMPT = (
 )
 
 
-def build_client() -> OpenAI:
-    api_key = os.getenv("DEEPSEEK_API_KEY")
+def build_client(api_key=None) -> OpenAI:
+    """Build the DeepSeek client. A caller-provided key wins (web BYOK);
+    otherwise fall back to DEEPSEEK_API_KEY from the environment."""
+    api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
         raise SystemExit(
             "未找到 DEEPSEEK_API_KEY。请复制 .env.example 为 .env 并填入你的 key，"

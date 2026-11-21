@@ -128,6 +128,11 @@ DeepSeek 官方 API 上，DeepSeek-V4.1-Flash-1017 的模型 id 是
   的 `done` 事件里还回去。这样服务器两次请求之间不留状态，才能
   放到 Vercel 这种无状态的 serverless 上；冷启动丢了事实也不怕，
   因为浏览器下次请求会重新带过来。
+- API key 是各用各的（BYOK）：页面上方有个 key 输入框，访客填自己
+  的 DeepSeek key，存在自己浏览器的 localStorage 里，每次请求一起
+  发过来；服务器只拿它调这一次 DeepSeek，不存、不缓存、不记日志。
+  请求没带 key 时，服务器才用环境变量里的 `DEEPSEEK_API_KEY` 兜底
+  （本地开发就靠这个）；两个都没有就报 400，提示填 key。
 - `run_agent` 是同步的，SSE 要边跑边发，所以循环跑在一个线程里，
   事件先进队列，`StreamingResponse` 再从队列里一个个吐出去。
   和 GUI 的 `worker.py` 是同一个思路：跑循环的线程不直接碰界面，
@@ -138,14 +143,16 @@ DeepSeek 官方 API 上，DeepSeek-V4.1-Flash-1017 的模型 id 是
 ### 部署到 Vercel
 
 1. 把仓库推到 GitHub，Vercel 里 New Project → Import 这个仓库。
-2. 在项目设置里加环境变量 `DEEPSEEK_API_KEY`（你的 DeepSeek key，
-   千万别写进代码或提交到仓库）。`DEEPSEEK_BASE_URL` /
-   `DEEPSEEK_MODEL` 不填就用默认值。
+2. 环境变量：**不要**在 Vercel 上设 `DEEPSEEK_API_KEY`——设了它，
+   不填 key 的访客就会用你的 key。每个访客在页面上填自己的 key。
+   `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` 不填就用默认值。
 3. Deploy。部署完打开给你的域名就能用。
 4. 限制要知道：免费版函数最长 60 秒（一轮对话如果调很多次工具
    可能超时）；`memory.json` 在 Vercel 上写不进磁盘，长期记忆靠
-   浏览器 localStorage 带着走；别人打开你的链接，用的都是你的
-   key，花的是你的额度——想给别人试，先想好额度。
+   浏览器 localStorage 带着走；key 是访客自己的，但请求要经过你
+   的服务器转发——服务器不存 key，不过理论上服务器能看到它，这是
+   BYOK 模式的固有前提，真要完全不经过你，就得在浏览器里直调
+   DeepSeek（那是下一步的改法）。
 
 ## 下一步
 
