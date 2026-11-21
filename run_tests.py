@@ -1,8 +1,11 @@
 """一键跑全部测试：python run_tests.py
 
-按顺序跑所有 test_*.py，每个文件都是独立脚本（不用 key、不联网，
-用假 client / 本地 HTTP 服务 / 假 MCP 服务模拟）。任何一个失败就
-停下并报非零退出码，CI 里也用它。
+按顺序跑 tests/ 下所有 test_*.py，每个文件都是独立脚本（不用 key、
+不联网，用假 client / 本地 HTTP 服务 / 假 MCP 服务模拟）。任何一个
+失败就停下并报非零退出码，CI 里也用它。
+
+测试单独跑也可以，但要从项目根目录加 PYTHONPATH，例如：
+    PYTHONPATH=. python tests/test_shell.py
 """
 
 import glob
@@ -11,14 +14,20 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+TESTS_DIR = os.path.join(HERE, "tests")
 
 
 def main() -> int:
-    tests = sorted(glob.glob(os.path.join(HERE, "test_*.py")))
+    tests = sorted(glob.glob(os.path.join(TESTS_DIR, "test_*.py")))
     if not tests:
         print("没有找到测试。")
         return 1
     env = dict(os.environ)
+    # 子进程要能 import jarvis.*（项目根目录）和 test_loop 这类
+    # 测试间互相 import 的模块（tests/ 目录）。
+    pythonpath = os.pathsep.join(
+        [HERE, TESTS_DIR] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+    env["PYTHONPATH"] = pythonpath
     qt_libs = "/tmp/qtlibs/usr/lib/x86_64-linux-gnu"
     env["LD_LIBRARY_PATH"] = (
         qt_libs + os.pathsep + env["LD_LIBRARY_PATH"]

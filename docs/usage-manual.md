@@ -17,9 +17,9 @@ Windows 上也可以直接用打包好的 exe：打 tag 后 GitHub Actions 会�
 
 | 界面 | 启动方式 |
 | --- | --- |
-| 命令行 | `python chat.py`（交互）或 `jarvis "问题"`（一次问答，需 `pip install -e .`） |
-| 桌面 | `python gui.py` |
-| 网页 | `uvicorn server:app`，打开 http://127.0.0.1:8000/（key 填在页面上方，只存浏览器） |
+| 命令行 | `python -m jarvis.ui.chat`（交互）或 `jarvis "问题"`（一次问答，需 `pip install -e .`） |
+| 桌面 | `python -m jarvis.ui.gui` |
+| 网页 | `uvicorn jarvis.ui.server:app`，打开 http://127.0.0.1:8000/（key 填在页面上方，只存浏览器） |
 
 ## 配置
 
@@ -105,7 +105,7 @@ jarvis --update                       # 检查有没有新版
 
 ## 常见问题
 
-- **没 key**：`python chat.py` 会提示去 `.env` 填 `DEEPSEEK_API_KEY`；
+- **没 key**：`python -m jarvis.ui.chat` 会提示去 `.env` 填 `DEEPSEEK_API_KEY`；
   网页版在页面上方填 key，只存浏览器。
 - **写文件被拦住了**：先看是不是危险命令，再看权限档位（`readonly` 直接拒绝，
   `edit` 要点确认）；`before_write` 钩子失败也会拦，输出里会写原因。

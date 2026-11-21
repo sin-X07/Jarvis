@@ -25,8 +25,8 @@ common_hidden = [
 ]
 
 a_cli = Analysis(
-    ["chat.py"],
-    pathex=[],
+    ["jarvis/ui/chat.py"],
+    pathex=[SPECPATH],
     binaries=[],
     datas=common_datas,
     hiddenimports=common_hidden,
@@ -49,8 +49,8 @@ exe_cli = EXE(
 )
 
 a_gui = Analysis(
-    ["gui.py"],
-    pathex=[],
+    ["jarvis/ui/gui.py"],
+    pathex=[SPECPATH],
     binaries=[],
     datas=common_datas,
     hiddenimports=common_hidden + ["PySide6"],

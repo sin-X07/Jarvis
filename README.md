@@ -16,13 +16,13 @@ pip install -r requirements-gui.txt   # 桌面版；只要命令行装 requireme
 #    key 在 https://platform.deepseek.com/api_keys 创建
 
 # 3. 先验证 key 能通
-python smoke_test.py
+python tests/smoke_test.py
 
-# 4. 跑起来
-python chat.py                        # 交互式对话
-python chat.py --print "现在几点？"    # 一次问答
-python gui.py                         # 桌面版
-uvicorn server:app --reload           # 网页版，打开 http://127.0.0.1:8000/
+# 4. 跑起来（在项目根目录下跑）
+python -m jarvis.ui.chat                        # 交互式对话
+python -m jarvis.ui.chat --print "现在几点？"    # 一次问答
+python -m jarvis.ui.gui                         # 桌面版
+uvicorn jarvis.ui.server:app --reload           # 网页版，打开 http://127.0.0.1:8000/
 
 # 5. 离线测试（不用 key、不联网）
 python run_tests.py                   # 全量测试，19 个文件 117 项
@@ -79,7 +79,9 @@ jarvis --version             打印版本号
 ## 工具
 
 文件、Shell、Git、搜索、记忆、委派、后台任务、技能、MCP 工具都在
-`tools.py` / `subagent.py` / `jobs.py` / `skills.py` / `mcp_client.py` 里。
+`jarvis/tools/tools.py` / `jarvis/runtime/subagent.py` /
+`jarvis/runtime/jobs.py` / `jarvis/extensions/skills.py` /
+`jarvis/extensions/mcp_client.py` 里。
 安全边界：文件工具只能动项目内的文件（`../` 越狱路径会被拦）；
 Shell 先过危险命令黑名单和工作区检查，写操作要确认，输出截断、
 超时 30 秒（可配），环境变量里不带 key；每一步都写审计日志
@@ -113,7 +115,7 @@ Shell 先过危险命令黑名单和工作区检查，写操作要确认，输�
   `before_shell` / `on_session_end`，每条是一条 shell 命令；
   `before_write` 的钩子返回非零就拦住写入。
 - **插件**：`plugins/` 里放一个 `.py`，定义 `TOOL_SCHEMA` + `TOOL_FUNC`，
-  就是一个新工具，不用改 `tools.py`。
+  就是一个新工具，不用改核心代码。
 
 ## 桌面版
 
@@ -166,30 +168,30 @@ Shell 先过危险命令黑名单和工作区检查，写操作要确认，输�
 
 | 文件 | 作用 |
 | --- | --- |
-| `agent.py` | agent loop 本体：发消息 → 模型要么回答、要么要求调工具 → 执行工具 → 把结果喂回去 → 循环 |
-| `tools.py` | 基础工具：时间、计算器、读/写/查文件、取网页、Git、搜索 |
-| `shell_tools.py` / `policy.py` / `permissions.py` / `audit.py` / `diffutil.py` | Shell、危险命令黑名单、权限三档、审计日志、写前 diff |
-| `memory.py` | 记忆层：短期记忆（整轮裁剪）与长期记忆（`memory.json` 事实库 + 检索 + 记忆工具） |
-| `config.py` / `model.py` / `usage.py` / `jlog.py` | 配置、模型调用（重试）、用量与费用、结构化日志 |
-| `session_store.py` / `compaction.py` | 会话持久化、上下文压缩 |
-| `todo.py` / `checkpoint.py` / `planner.py` | 待办清单、文件检查点、规划模式 |
-| `subagent.py` / `jobs.py` | 子代理委派、后台任务 |
-| `skills.py` / `skills/` / `mcp_client.py` / `hooks.py` / `plugins.py` | 技能、MCP 客户端、Hooks、插件加载 |
-| `md.py` | 极简 Markdown → ANSI / HTML（CLI 与 GUI 共用） |
-| `trajectory.py` / `update.py` | 轨迹回放、自更新检查 |
-| `chat.py` | 命令行入口：REPL + 一次问答 + 会话/用量/轨迹/更新命令 |
-| `worker.py` | GUI 的后台线程：`AgentWorker` 在 QThread 里跑循环，结果用信号发回主线程，写操作确认也走信号 |
-| `gui.py` | 图形界面：聊天区、会话列表、记忆侧栏、设置、检查点、轨迹 |
-| `server.py` | 网页版后端：FastAPI，`GET /` 返回聊天页，`POST /api/chat` 用 SSE 流式返回 |
+| `jarvis/core/agent.py` | agent loop 本体：发消息 → 模型要么回答、要么要求调工具 → 执行工具 → 把结果喂回去 → 循环 |
+| `jarvis/tools/tools.py` | 基础工具：时间、计算器、读/写/查文件、取网页、Git、搜索 |
+| `jarvis/tools/shell_tools.py` / `jarvis/safety/policy.py` / `jarvis/safety/permissions.py` / `jarvis/safety/audit.py` / `jarvis/safety/diffutil.py` | Shell、危险命令黑名单、权限三档、审计日志、写前 diff |
+| `jarvis/memory/memory.py` | 记忆层：短期记忆（整轮裁剪）与长期记忆（`memory.json` 事实库 + 检索 + 记忆工具） |
+| `jarvis/core/config.py` / `jarvis/core/model.py` / `jarvis/core/usage.py` / `jarvis/core/jlog.py` | 配置、模型调用（重试）、用量与费用、结构化日志 |
+| `jarvis/memory/session_store.py` / `jarvis/memory/compaction.py` | 会话持久化、上下文压缩 |
+| `jarvis/memory/todo.py` / `jarvis/memory/checkpoint.py` / `jarvis/memory/planner.py` | 待办清单、文件检查点、规划模式 |
+| `jarvis/runtime/subagent.py` / `jarvis/runtime/jobs.py` | 子代理委派、后台任务 |
+| `jarvis/extensions/skills.py` / `skills/` / `jarvis/extensions/mcp_client.py` / `jarvis/extensions/hooks.py` / `jarvis/extensions/plugins.py` | 技能、MCP 客户端、Hooks、插件加载 |
+| `jarvis/ui/md.py` | 极简 Markdown → ANSI / HTML（CLI 与 GUI 共用） |
+| `jarvis/ui/trajectory.py` / `jarvis/ui/update.py` | 轨迹回放、自更新检查 |
+| `jarvis/ui/chat.py` | 命令行入口：REPL + 一次问答 + 会话/用量/轨迹/更新命令 |
+| `jarvis/ui/worker.py` | GUI 的后台线程：`AgentWorker` 在 QThread 里跑循环，结果用信号发回主线程，写操作确认也走信号 |
+| `jarvis/ui/gui.py` | 图形界面：聊天区、会话列表、记忆侧栏、设置、检查点、轨迹 |
+| `jarvis/ui/server.py` | 网页版后端：FastAPI，`GET /` 返回聊天页，`POST /api/chat` 用 SSE 流式返回 |
 | `api/index.py` / `vercel.json` | Vercel 入口与配置 |
 | `jarvis.spec` / `build-exe.ps1` / `.github/workflows/build.yml` | PyInstaller 打包（Windows 上跑）、CI 打 tag 自动出 exe |
-| `CHANGELOG.md` / `docs/usage-manual.md` | 更新日志、日常使用手册 |
-| `run_tests.py` / `test_*.py` | 全量测试入口与 19 个测试文件（117 项，离线跑） |
+| `CHANGELOG.md` / `docs/usage-manual.md` / `docs/ARCHITECTURE.md` | 更新日志、日常使用手册、架构说明 |
+| `run_tests.py` / `tests/test_*.py` | 全量测试入口与 19 个测试文件（117 项，离线跑） |
 | `.env.example` / `requirements.txt` / `requirements-gui.txt` / `pyproject.toml` | 配置模板、依赖、打包配置 |
 
 ## 常见问题
 
-- **没 key**：`python chat.py` 会提示去 `.env` 填 `DEEPSEEK_API_KEY`；
+- **没 key**：`python -m jarvis.ui.chat` 会提示去 `.env` 填 `DEEPSEEK_API_KEY`；
   网页版在页面上方填 key，只存浏览器。
 - **写文件被拦住了**：先看是不是危险命令，再看权限档位（`readonly` 直接拒绝，
   `edit` 要点确认）；`before_write` 钩子失败也会拦，输出里会写原因。

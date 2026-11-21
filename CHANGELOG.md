@@ -4,6 +4,12 @@
 
 相对 0.1.0（starter + 记忆层 + 6 个工具 + GUI + 网页版）的全部新增：
 
+### 目录重组（2026-11-22，无行为变化）
+
+- 单目录平铺改成彻底分包：`jarvis/core/`（配置、模型、循环、用量、日志）、`jarvis/safety/`（权限、策略、审计、diff）、`jarvis/tools/`（文件、Shell、项目感知）、`jarvis/memory/`（记忆、会话、压缩、待办、检查点、规划）、`jarvis/runtime/`（子代理、后台任务）、`jarvis/extensions/`（技能、MCP、Hooks、插件）、`jarvis/ui/`（命令行、桌面、网页）；测试全挪进 `tests/`，冒烟测试是 `tests/smoke_test.py`
+- 入口改成 `python -m jarvis.ui.chat` / `python -m jarvis.ui.gui` / `uvicorn jarvis.ui.server:app`；`pip install -e .` 后的 `jarvis` 命令不变
+- `PROJECT_ROOT` 只在 `jarvis/__init__.py` 里算一次，文件沙箱根、技能目录、插件目录、默认 `memory.json` 都从它派生；分层与 import 规则见 `docs/ARCHITECTURE.md`
+
 ### P0 基础
 - `config.py`：统一配置（环境变量 > `~/.jarvis/config.json` > 默认值），`jarvis --version` 打印 `0.2.0`
 - `model.py`：模型调用抽出来，429/超时/5xx 自动重试（指数退避），流式用量估算
