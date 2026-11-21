@@ -1,0 +1,4 @@
+# GUI 专用依赖：只需要跑 python gui.py 时装。
+# 单独放一个文件，是因为 Vercel 部署只读 requirements.txt，
+# 而 PySide6 整个装下来约 260MB，会超过 serverless 函数的大小上限。
+PySide6>=6.7

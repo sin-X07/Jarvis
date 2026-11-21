@@ -1,2 +1,4 @@
 openai>=1.40
 python-dotenv>=1.0
+fastapi>=0.110  # 网页版：server.py（Vercel 也用这份，不含 PySide6）
+uvicorn>=0.29   # 网页版本地运行：uvicorn server:app --reload
