@@ -48,9 +48,14 @@ from PySide6.QtWidgets import (
 
 from jarvis.core.agent import MODEL, SYSTEM_PROMPT, build_client
 from jarvis.core.config import load_config, save_config
+from jarvis.extensions.skills import skill_tools, skills_prompt_fragment
 from jarvis.memory.checkpoint import (
     CheckpointStore, set_current_store, snapshot_if_active)
+from jarvis.memory.compaction import maybe_compact, summarize_with_model
+from jarvis.runtime.jobs import JobManager, jobs_tools
+from jarvis.runtime.subagent import subagent_tools
 from jarvis.safety.diffutil import parse_diff
+from jarvis.tools.project import project_context_text
 from jarvis.ui.events import friendly_error
 from jarvis.ui.md import to_html
 from jarvis.memory.memory import ConversationMemory, FactStore, memory_tools
@@ -62,7 +67,9 @@ from jarvis.tools.tools import register_before_write_hook, working_tree_diff
 from jarvis.ui.theme import (load_theme, load_ui_prefs, save_ui_prefs,
                              to_qss)
 from jarvis.core.usage import UsageTracker
-from jarvis.ui.worker import AgentWorker
+from jarvis.ui.viewstate import (EMPTY_HINTS, EMPTY_TAGLINE,
+                                 build_execute_prompt, diff_note)
+from jarvis.ui.worker import AgentWorker, VerifyWorker
 
 # QSS 由 theme.json 生成（U0-2）：视觉与旧手写 DARK_STYLE 一致，
 # 颜色只在 theme.json 里改一处。
@@ -646,18 +653,32 @@ class MainWindow(QMainWindow):
         self._config = load_config()
         self._store = store if store is not None else FactStore()
         self._memory = ConversationMemory(self._system_prompt())
-        self._schemas, self._funcs = memory_tools(self._store)
+        # U7：工具表与 CLI/TUI 对齐——以前 GUI 只有 memory_tools，
+        # 技能 / 子代理 / 后台任务三组工具都没接，模型调 delegate 或
+        # run_shell_background 会报未知工具。
+        self._usage = UsageTracker()
+        self._jobs = JobManager()
+        mem_schemas, mem_funcs = memory_tools(self._store)
+        sk_schemas, sk_funcs = skill_tools()
+        sub_schemas, sub_funcs = subagent_tools(
+            client, self._config.model, usage=self._usage)
+        job_schemas, job_funcs = jobs_tools(self._jobs)
+        self._schemas = (mem_schemas + sk_schemas + sub_schemas
+                         + job_schemas)
+        self._funcs = {**mem_funcs, **sk_funcs, **sub_funcs, **job_funcs}
         self._sessions = session_store if session_store is not None \
             else SessionStore()
         self._session_id = None
         self._checkpoints = None
         self._gate = ApprovalGate(self._config.permission)
-        self._usage = UsageTracker()
         self._todo = None
         self._set_todo(TodoList())
         self.todo_changed.connect(self._refresh_todos)
         self._plan_task = None
         self._pending_plan = None
+        self._pending_verify_plan = None  # U7：获批计划执行完待验收的 Plan
+        self._verify_thread = None
+        self._verify_worker = None
         self._thread = None
         self._worker = None
         self._busy = False
@@ -679,9 +700,7 @@ class MainWindow(QMainWindow):
         self._restore_geometry()
         self.setWindowTitle("Jarvis")
         self._add_transcript_widget(NoteWidget(
-            "Jarvis 已启动。能记住事情、读写文件、跑命令。"
-            "直接说话，或者先记住点什么："
-            "“记住，我最喜欢蓝色”。"))
+            "Jarvis 已启动。" + EMPTY_TAGLINE + " " + EMPTY_HINTS[0]))
         if client is None:
             # 没 key：窗口照常打开，首次启动向导随后自动弹（U6-3）。
             # 用挂在窗口下的 QTimer 而不用 QTimer.singleShot：singleShot
@@ -769,9 +788,25 @@ class MainWindow(QMainWindow):
         self.new_session_button = QPushButton("新会话")
         self.new_session_button.clicked.connect(self.new_session)
         s_layout.addWidget(self.new_session_button)
+        self.fork_session_button = QPushButton("分叉当前会话")
+        self.fork_session_button.clicked.connect(self.fork_session)
+        s_layout.addWidget(self.fork_session_button)
         s_layout.addWidget(QLabel("长期记忆"))
         self.memory_list = QListWidget()
         s_layout.addWidget(self.memory_list)
+        # U7：记忆增删（以前 GUI 只有只读列表；与 CLI/TUI 的
+        # /remember /forget 对齐）。
+        mem_row = QHBoxLayout()
+        self.memory_input = QLineEdit()
+        self.memory_input.setPlaceholderText("记住点什么…")
+        mem_row.addWidget(self.memory_input)
+        remember_btn = QPushButton("记住")
+        remember_btn.clicked.connect(self._remember_fact)
+        mem_row.addWidget(remember_btn)
+        delete_mem_btn = QPushButton("删除选中")
+        delete_mem_btn.clicked.connect(self._delete_memory)
+        mem_row.addWidget(delete_mem_btn)
+        s_layout.addLayout(mem_row)
         self.clear_button = QPushButton("清空对话")
         self.clear_button.clicked.connect(self.clear_chat)
         s_layout.addWidget(self.clear_button)
@@ -812,6 +847,15 @@ class MainWindow(QMainWindow):
         self.ckpt_list.itemClicked.connect(self._on_ckpt_clicked)
         c_layout.addWidget(self.ckpt_list)
         self.tabs.addTab(ckpt_tab, "检查点")
+
+        # U7：后台任务 Tab（以前 GUI 没接 JobManager；与 CLI/TUI 的
+        # /jobs 对齐，只读列表，任务本身由模型调 job_status/job_result 查）。
+        jobs_tab = QWidget()
+        j_layout = QVBoxLayout(jobs_tab)
+        j_layout.addWidget(QLabel("后台任务（run_shell_background 派出的任务）"))
+        self.jobs_list = QListWidget()
+        j_layout.addWidget(self.jobs_list)
+        self.tabs.addTab(jobs_tab, "任务")
 
         splitter.setSizes([750, 350])
 
@@ -919,12 +963,43 @@ class MainWindow(QMainWindow):
     # -- memory / sessions -----------------------------------------------
 
     def _system_prompt(self) -> str:
+        # U7：与 CLI/TUI 的 build_system_prompt 对齐——以前 GUI 只有
+        # 基础人设 + 长期记忆，技能列表和项目规则都没拼进去。
+        parts = [SYSTEM_PROMPT]
         facts = self._store.render_for_prompt()
-        return f"{SYSTEM_PROMPT}\n{facts}" if facts else SYSTEM_PROMPT
+        if facts:
+            parts.append(facts)
+        project = project_context_text(".")
+        if project:
+            parts.append(project)
+        skills = skills_prompt_fragment()
+        if skills:
+            parts.append(skills)
+        return "\n\n".join(parts)
 
     def _refresh_memory_list(self):
         self.memory_list.clear()
         self.memory_list.addItems(self._store.all_texts())
+
+    def _remember_fact(self):
+        text = self.memory_input.text().strip()
+        if not text:
+            return
+        self._note(self._store.add(text))
+        self.memory_input.clear()
+        self._refresh_memory_list()
+
+    def _delete_memory(self):
+        item = self.memory_list.currentItem()
+        if item is None:
+            self._note("先在长期记忆里选中一条再删。")
+            return
+        self._note(self._store.delete(item.text()))
+        self._refresh_memory_list()
+
+    def _refresh_jobs(self):
+        self.jobs_list.clear()
+        self.jobs_list.addItems(self._jobs.list_jobs().splitlines())
 
     def _refresh_session_list(self):
         self.session_list.clear()
@@ -987,6 +1062,16 @@ class MainWindow(QMainWindow):
         self._clear_transcript()
         self._note("新会话。")
         self.status_label.setText("就绪")
+
+    def fork_session(self):
+        """分叉当前会话：复制全部事件到新会话并切过去（与 CLI /fork、网页“⑂ 分叉”对齐）。"""
+        if self._busy or not self._session_id:
+            self._note("当前还没有会话，先聊一句再分叉。")
+            return
+        new_id = self._sessions.fork(self._session_id)
+        self._refresh_session_list()
+        self.resume_session(new_id)
+        self.status_label.setText(f"已分叉到新会话 {new_id[:12]}")
 
     def _cycle_permission(self):
         """档位芯片点一下换档：readonly → edit → auto。"""
@@ -1075,6 +1160,8 @@ class MainWindow(QMainWindow):
             self._refresh_diff()
         elif self.tabs.tabText(index) == "检查点":
             self._refresh_ckpts()
+        elif self.tabs.tabText(index) == "任务":
+            self._refresh_jobs()
 
     def _refresh_diff(self):
         """Diff Tab：工作区当前改动按文件分组（U5-1），每文件小节头
@@ -1111,7 +1198,7 @@ class MainWindow(QMainWindow):
 
     def _accept_diff(self):
         """接受全部：改动留在工作区，只记一条已审阅（U5 再做逐文件卡片）。"""
-        self._note("已接受当前改动（改动保留在工作区）。")
+        self._note(diff_note(True))
 
     def _reject_diff(self):
         """拒绝全部：用检查点把经 Jarvis 写入的文件恢复到写入前。
@@ -1256,6 +1343,21 @@ class MainWindow(QMainWindow):
             "role": "system",
             "content": self._system_prompt(),
         }
+        # U7：上下文压缩（以前 GUI 没有，CLI/TUI 在 ask() 里做，GUI 的
+        # worker 直接调 run_agent，历史只会越攒越长）。与 CLI/TUI 同款
+        # maybe_compact 调用；没 key 时上面已返回，不会走到这里。
+        try:
+            new_messages, did_compact, summary = maybe_compact(
+                self._memory.messages,
+                summarizer=lambda msgs: summarize_with_model(
+                    self._client, self._config.model, msgs),
+                limit_tokens=self._config.context_limit)
+            if did_compact:
+                self._memory.messages = new_messages
+                self._sessions.append_event(
+                    self._session_id, "summary", {"content": summary})
+        except Exception:  # noqa: BLE001 - 压缩失败不拦本轮，照常跑
+            pass
         plan_mode = self.plan_button.isChecked() and not regenerate
         if plan_mode:
             self._plan_task = text
@@ -1403,7 +1505,46 @@ class MainWindow(QMainWindow):
         self._refresh_session_list()
         self._refresh_ckpts()
         self._stop_turn_thread()
+        # U7：获批计划的执行轮跑完，对照验收标准检查（以前 GUI 从没
+        # 验过）。验收在独立 worker 线程里跑，报告回来挂成一张卡片。
+        if self._pending_verify_plan is not None:
+            plan = self._pending_verify_plan
+            self._pending_verify_plan = None
+            self._start_verify(plan, answer)
         self._drain_queue()
+
+    def _start_verify(self, plan, answer: str) -> None:
+        """起 VerifyWorker 跑 verify_plan（QThread，报告回主线程）。"""
+        if self._client is None:
+            return
+        self._verify_thread = QThread()
+        self._verify_worker = VerifyWorker(
+            self._client, self._config.model, plan, answer,
+            usage=self._usage)
+        self._verify_worker.moveToThread(self._verify_thread)
+        self._verify_thread.started.connect(self._verify_worker.run)
+        self._verify_worker.verified.connect(self._on_verify_done)
+        self._verify_worker.failed.connect(self._on_verify_failed)
+        self._verify_worker.verified.connect(self._verify_thread.quit)
+        self._verify_worker.failed.connect(self._verify_thread.quit)
+        self._verify_thread.start()
+
+    def _stop_verify_thread(self) -> None:
+        """停掉验收线程并丢引用（与 _stop_turn_thread 同款做法）。"""
+        thread = self._verify_thread
+        self._verify_thread = None
+        self._verify_worker = None
+        if thread is not None:
+            thread.quit()
+            thread.wait(3000)
+
+    def _on_verify_done(self, report: str) -> None:
+        self._note("验收检查：\n" + report)
+        self._stop_verify_thread()
+
+    def _on_verify_failed(self, message: str) -> None:
+        self._note("验收检查失败：" + message)
+        self._stop_verify_thread()
 
     def _on_stopped(self):
         self._error_streak = 0
@@ -1413,6 +1554,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText("已停止")
         self._refresh_statusbar()
         self._stop_turn_thread()
+        self._pending_verify_plan = None  # 用户掐断了执行轮：验收不跑了
         self._drain_queue()
 
     def _on_error(self, message: str):
@@ -1434,6 +1576,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText("出错")
         self._refresh_statusbar()
         self._stop_turn_thread()
+        self._pending_verify_plan = None  # 执行轮出错：验收不跑了
         self.plan_button.setChecked(False)
 
     def _copy_question_new_session(self):
@@ -1464,8 +1607,10 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentIndex(1)  # 切到待办 Tab，看清单实时打勾
         self._add_transcript_widget(NoteWidget("已批准，开始按计划执行。"))
         task = self._plan_task or ""
-        prompt = (f"按顺序执行下面的计划，每完成一步调 update_todo 更新进度。"
-                  f"\n\n{plan.render()}\n\n任务：{task}")
+        # U7：执行完要验收——把 Plan 记下来，执行轮 finished 后起
+        # VerifyWorker（见 _on_finished）。
+        self._pending_verify_plan = plan
+        prompt = build_execute_prompt(plan.render(), task)
         self._start_turn(prompt, mount_user=False)
 
     def _reject_plan(self):
@@ -1592,6 +1737,7 @@ class MainWindow(QMainWindow):
             except (TypeError, RuntimeError):
                 pass
         self._stop_turn_thread()
+        self._stop_verify_thread()
         event.accept()
 
 

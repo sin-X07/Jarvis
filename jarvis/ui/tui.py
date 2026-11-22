@@ -52,6 +52,9 @@ from jarvis.ui.events import (friendly_error, summarise_tool_call,
                               tool_risk)
 from jarvis.ui.theme import (load_theme, load_ui_prefs,
                            save_ui_prefs, to_textual_css)
+from jarvis.ui.viewstate import (EMPTY_HINTS, EMPTY_TAGLINE,
+                                 build_execute_prompt,
+                                 checkpoint_cutoff_for_row, diff_note)
 
 try:
     from textual.app import App, ComposeResult
@@ -87,6 +90,7 @@ COMMANDS = [
     ("theme", "切换主题（dark / light）"),
     ("context", "用量明细：按调用拆开的 token/费用 + 优化建议"),
     ("diff", "显示当前改动（按文件分组，含未跟踪文件）"),
+    ("regenerate", "重新生成上一条回答"),
     ("compact", "手动压缩上下文"),
     ("quit", "退出"),
 ]
@@ -830,8 +834,7 @@ class JarvisTUI(App):
             return
         box = Vertical(
             Static("Jarvis 已启动", id="launchpad-title"),
-            Static("能记住事情、读写文件、跑命令。"
-                   "直接说话，或者先记住点什么。输入 / 看命令，? 看快捷键。",
+            Static(EMPTY_TAGLINE + " " + " ".join(EMPTY_HINTS),
                    id="launchpad-hint"),
             *([Static("没填 key 时先跑 /setup（填 key、选模型、选档位）。",
                       id="launchpad-hint")] if no_key else []),
@@ -919,7 +922,8 @@ class JarvisTUI(App):
                              extra_tools=self.session.extra_tools,
                              extra_funcs=self.session.extra_funcs,
                              max_steps=self.session.max_steps,
-                             on_event=self._agent_event)
+                             on_event=self._agent_event,
+                             usage=self.session.usage)
         except Exception as exc:  # noqa: BLE001 - 报错进卡片，不崩界面
             self.call_from_thread(self._turn_done, None, str(exc))
             return
@@ -929,10 +933,20 @@ class JarvisTUI(App):
         if card.result == "approve":
             self.session._set_todo(card.plan.to_todos())
             self.call_from_thread(self._refresh_todos)
-            prompt = (f"按顺序执行下面的计划，每完成一步调 update_todo 更新进度。"
-                      f"\n\n{card.plan.render()}\n\n任务：{task}")
+            prompt = build_execute_prompt(card.plan.render(), task)
             try:
                 answer = self.session.ask(prompt, self._agent_event)
+                # U7：执行完对照验收标准检查（以前 TUI 只 import 了
+                # verify_plan，从没调过）。验收轮的 token 也进用量。
+                try:
+                    report = verify_plan(
+                        self.session.client, self.session.model,
+                        card.plan, answer, usage=self.session.usage)
+                    self.call_from_thread(
+                        self._note, "验收检查：\n" + report)
+                except Exception as exc:  # noqa: BLE001 - 验收失败不拦主流程
+                    self.call_from_thread(
+                        self._note, "验收检查失败：" + str(exc))
                 self.call_from_thread(self._turn_done, answer, None)
             except _StopRequested:
                 self.call_from_thread(self._turn_done, None, "stopped")
@@ -1298,7 +1312,7 @@ class JarvisTUI(App):
 
     def _accept_diff(self) -> None:
         """接受全部：改动留在工作区，只记一条已审阅（U5-1）。"""
-        self._note("已接受当前改动（改动保留在工作区）。")
+        self._note(diff_note(True))
 
     def _reject_diff(self) -> None:
         """拒绝全部：用检查点把经 Jarvis 写入的文件恢复到写入前。
@@ -1333,18 +1347,28 @@ class JarvisTUI(App):
             li.data = row
             lst.append(li)
 
-    def restore_checkpoint_row(self, index: int) -> None:
-        """回车恢复检查点：回到选中的那一条（只回滚文件，消息不动）。"""
+    def restore_checkpoint_row(self, display_index: int) -> None:
+        """回车恢复检查点：回到选中的那一条（只回滚文件，消息不动）。
+
+        U7 修正：检查点列表是按时间倒序展示的（最新的在上面），
+        display_index 是展示序号；先换算成时间正序的下标，再按该行
+        的 ts 调 rewind_to（以前按展示序号直接算步数，选最新一行会
+        把全部检查点都回滚掉）。
+        """
         ckpts = self.session.checkpoints
         if not ckpts:
             return
         rows = ckpts.list_checkpoints()
-        if not (0 <= index < len(rows)):
+        if not rows or not 0 <= display_index < len(rows):
             return
-        steps = len(rows) - index
-        restored = ckpts.rewind(steps)
-        note = ("已恢复检查点：" + "、".join(restored)) if restored \
-            else "没有可恢复的检查点。"
+        chrono_index = len(rows) - 1 - display_index
+        cutoff = checkpoint_cutoff_for_row(rows, chrono_index)
+        if cutoff is None:
+            return
+        restored = ckpts.rewind_to(cutoff)
+        note = (("已恢复检查点：" + "、".join(
+            os.path.basename(p) for p in restored)) if restored
+            else "没有可恢复的检查点。")
         self._mount_to_transcript(Static(note, classes="msg-shell"))
         self._refresh_ckpts()
 
@@ -1669,10 +1693,46 @@ class JarvisTUI(App):
             self._note(render_diff_grouped(working_tree_diff())
                        + "\n接受改动 = 什么都不用做；拒绝改动 = "
                          "Diff 页点“拒绝全部”。")
+        elif cmd == "regenerate":
+            self._regenerate()
         elif cmd == "compact":
             self._run_compact()
         else:
             self._note(f"未知命令：{text}，输入 /help 看全部命令。")
+
+    def _regenerate(self) -> None:
+        """U7：重新生成上一条回答（GUI/网页已有，TUI 补齐）。
+
+        删掉内存里本轮 trailing 的 assistant/tool 消息（与 GUI 的
+        _on_regenerate 同款做法），再用上一条用户消息重问一次；
+        不重复挂用户气泡（问题已经在 transcript 里）。
+        """
+        if self.busy:
+            self._note("先等这轮跑完，再重新生成。")
+            return
+        if not self._last_user_text:
+            self._note("还没有可重新生成的问题，先问一句。")
+            return
+        if self.client is None:
+            try:
+                self.client = build_client()
+                self.session.client = self.client
+            except SystemExit:
+                self._show_error("没找到 DeepSeek API key，先跑 /setup 填 key。")
+                return
+        msgs = self.session.memory.messages
+        while msgs and msgs[-1].get("role") in ("assistant", "tool"):
+            msgs.pop()
+        self.busy = True
+        self._stop_requested = False
+        self._error_shown_this_turn = False
+        self._bubble = None
+        self._bubble_text = ""
+        self._thinking = None
+        self._tool_card = None
+        self._refresh_topbar()
+        self.run_worker(partial(self._ask_worker, self._last_user_text),
+                        thread=True)
 
     def _context_text(self) -> str:
         """`/context`：按调用拆开的用量明细 + 优化建议。"""

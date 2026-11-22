@@ -88,7 +88,7 @@ class AgentWorker(QObject):
                     extra_tools=self._extra_tools,
                     extra_funcs=self._extra_funcs,
                     max_steps=self._max_steps or 8,
-                    on_event=self._on_event)
+                    on_event=self._on_event, usage=self.usage)
                 self.plan_ready.emit({
                     "markdown": plan.render(), "goal": plan.goal,
                     "steps": plan.steps, "risks": plan.risks})
@@ -144,3 +144,33 @@ class AgentWorker(QObject):
             self.status.emit(
                 f"{mark} {payload['name']} 已返回"
                 f"（{payload['duration_ms']}ms）")
+
+
+class VerifyWorker(QObject):
+    """U7：计划执行完的验收 worker（GUI 专用）。
+
+    计划获批后的执行轮在 AgentWorker 里跑完、finished 信号回主线程后，
+    主线程再起这个 worker 在 QThread 里调 verify_plan：对照验收标准
+    逐项检查，报告回主线程挂成一张卡片。验收轮的 token 也进 usage。
+    """
+
+    verified = Signal(str)   # 验收报告全文
+    failed = Signal(str)     # 验收本身出错（不拦主流程，只提示）
+
+    def __init__(self, client, model, plan, answer, usage=None):
+        super().__init__()
+        self._client = client
+        self._model = model
+        self._plan = plan
+        self._answer = answer
+        self._usage = usage
+
+    def run(self) -> None:
+        try:
+            from jarvis.memory.planner import verify_plan
+            report = verify_plan(self._client, self._model, self._plan,
+                                 self._answer, usage=self._usage)
+            self.verified.emit(report)
+        except Exception as exc:  # noqa: BLE001 - 验收失败只提示，不崩线程
+            self.failed.emit(str(exc))
+

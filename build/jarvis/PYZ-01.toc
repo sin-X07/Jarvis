@@ -1457,6 +1457,14 @@
   ('jarvis.core.usage',
    'D:\\BJTU\\Personal agent\\jarvis-agent-starter\\jarvis\\core\\usage.py',
    'PYMODULE'),
+  ('jarvis.extensions',
+   'D:\\BJTU\\Personal '
+   'agent\\jarvis-agent-starter\\jarvis\\extensions\\__init__.py',
+   'PYMODULE'),
+  ('jarvis.extensions.skills',
+   'D:\\BJTU\\Personal '
+   'agent\\jarvis-agent-starter\\jarvis\\extensions\\skills.py',
+   'PYMODULE'),
   ('jarvis.memory',
    'D:\\BJTU\\Personal '
    'agent\\jarvis-agent-starter\\jarvis\\memory\\__init__.py',
@@ -1464,6 +1472,10 @@
   ('jarvis.memory.checkpoint',
    'D:\\BJTU\\Personal '
    'agent\\jarvis-agent-starter\\jarvis\\memory\\checkpoint.py',
+   'PYMODULE'),
+  ('jarvis.memory.compaction',
+   'D:\\BJTU\\Personal '
+   'agent\\jarvis-agent-starter\\jarvis\\memory\\compaction.py',
    'PYMODULE'),
   ('jarvis.memory.memory',
    'D:\\BJTU\\Personal agent\\jarvis-agent-starter\\jarvis\\memory\\memory.py',
@@ -1477,6 +1489,17 @@
    'PYMODULE'),
   ('jarvis.memory.todo',
    'D:\\BJTU\\Personal agent\\jarvis-agent-starter\\jarvis\\memory\\todo.py',
+   'PYMODULE'),
+  ('jarvis.runtime',
+   'D:\\BJTU\\Personal '
+   'agent\\jarvis-agent-starter\\jarvis\\runtime\\__init__.py',
+   'PYMODULE'),
+  ('jarvis.runtime.jobs',
+   'D:\\BJTU\\Personal agent\\jarvis-agent-starter\\jarvis\\runtime\\jobs.py',
+   'PYMODULE'),
+  ('jarvis.runtime.subagent',
+   'D:\\BJTU\\Personal '
+   'agent\\jarvis-agent-starter\\jarvis\\runtime\\subagent.py',
    'PYMODULE'),
   ('jarvis.safety',
    'D:\\BJTU\\Personal '
@@ -1499,6 +1522,9 @@
   ('jarvis.tools',
    'D:\\BJTU\\Personal agent\\jarvis-agent-starter\\jarvis\\tools\\__init__.py',
    'PYMODULE'),
+  ('jarvis.tools.project',
+   'D:\\BJTU\\Personal agent\\jarvis-agent-starter\\jarvis\\tools\\project.py',
+   'PYMODULE'),
   ('jarvis.tools.shell_tools',
    'D:\\BJTU\\Personal '
    'agent\\jarvis-agent-starter\\jarvis\\tools\\shell_tools.py',
@@ -1517,6 +1543,9 @@
    'PYMODULE'),
   ('jarvis.ui.theme',
    'D:\\BJTU\\Personal agent\\jarvis-agent-starter\\jarvis\\ui\\theme.py',
+   'PYMODULE'),
+  ('jarvis.ui.viewstate',
+   'D:\\BJTU\\Personal agent\\jarvis-agent-starter\\jarvis\\ui\\viewstate.py',
    'PYMODULE'),
   ('jarvis.ui.worker',
    'D:\\BJTU\\Personal agent\\jarvis-agent-starter\\jarvis\\ui\\worker.py',

@@ -108,6 +108,7 @@ python-version/
 | `trajectory.py` | 轨迹回放（会话时间线；`iter_turns` 分轮、`replay_transcript` 重放） |
 | `update.py` | 自更新检查（只检查 GitHub releases，不安装） |
 | `events.py` | 事件模型（U0）：11 种 UI 事件表 + 工具摘要注册表 + 风险分级 |
+| `viewstate.py` | 共用视图状态（U7）：`ViewState` 状态机 + 统一文案 + 检查点点行换算；四个界面是这份状态的渲染器 |
 | `tui.py` | 全屏 TUI（U2，Textual）：四层布局 + 侧栏 Tab + 确认单键 + 补全 |
 | `theme.py` / `theme.json` | 主题（U0）：单一事实来源，生成 CSS 变量 / QSS / ANSI 角色表 / Textual CSS |
 
@@ -124,7 +125,7 @@ python-version/
 ## 事件模型（U0，UI 优化底座）
 
 `run_agent` 的 `on_event(kind, payload)` 只发 `jarvis/ui/events.py`
-里 `EVENT_KINDS` 的 11 种事件；三个界面（网页 / TUI / 桌面）只订阅
+里 `EVENT_KINDS` 的 11 种事件；四个界面（网页 / TUI / 桌面 / CLI）只订阅
 这张表，不再直接读 agent 内部状态。核心发
 `text_delta` / `thinking_delta` / `tool_start` / `tool_end` /
 `status` / `turn_end` / `error`；`todo_set` / `plan_proposed` 由
@@ -144,12 +145,35 @@ tool_result / summary / todo / plan / error。`trajectory.py` 的
 主题：`jarvis/ui/theme.json`（dark）是唯一事实来源；
 `theme.py` 的 `to_css_vars` / `to_qss` / `to_ansi_roles` 生成三份产物。
 桌面 QSS 由生成器出，视觉与旧手写 `DARK_STYLE` 一致（`test_events.py`
-里有逐字比对）；三个界面不许再出现硬编码颜色。
+里有逐字比对）；四个界面不许再出现硬编码颜色（`.get('token', '#fallback')`
+兜底除外）。
 
 用量（U0-5）：token 数全部来自 API 返回的真 usage。流式传
 `stream_options={"include_usage": True}`，最后一个 chunk 带整次请求的
 usage；拿不到时记 unknown，界面显示"—"，绝不估算。`estimate_tokens`
 只供 compaction 内部触发判断用，不进入统计、不上界面。
+
+## 四界面统一（U7，`jarvis/ui/viewstate.py`）
+
+events.py 是事件契约（一次性的流），viewstate.py 是状态机（界面当前
+在展示什么）：`ViewState` 存会话 / 计划 / 待办 / Diff / 检查点 /
+用量 / 忙闲，`apply_event(kind, payload)` 按 11 种事件更新它；四个
+界面是这份状态的渲染器，只决定用什么控件/按键把它画出来。统一文案
+（`HELP_TEXT` / `EMPTY_HINTS` / `MODE_LABELS` / `diff_note`）和执行
+提示词（`build_execute_prompt`）也只在这里定一份。统一的是功能和
+状态，不是操作方式：TUI 保持键盘驱动、GUI 保持鼠标驱动、网页保持
+浏览器交互、CLI 保持打字命令；不要为了统一砍掉某个界面已有的功能。
+
+U7 补齐的缺口（审计全文见 `~/workspace/goals/jarvis-personal-agent/files/jarvis-四界面功能对照表.md`，
+交付报告见同目录 `jarvis-UI统一-交付报告.md`）：verify_plan 四方全接；
+计划轮/验收轮 token 进用量；CLI `/checkpoints` + `/rewind-to`；
+TUI 检查点恢复改 `rewind_to`（并修了倒序列表的步数换算 bug）、
+`/regenerate`；GUI 补上下文压缩、jobs Tab、delegate/技能工具接线、
+记忆增删；网页版补 `verify` 事件与会话分叉。验收补修：GUI 补“分叉当前会话”
+按钮（与 CLI `/fork`、网页分叉对齐）；空态文案四方同源（`viewstate.EMPTY_TAGLINE` /
+`EMPTY_HINTS`，TUI launchpad、GUI 启动提示、网页 `#empty` 都引用它）。
+做不了的项（网页版检查点/审批门/后台任务/压缩、CLI 的 Stop/排队等）同样写在交付报告
+里，每项带验证依据，不硬补。
 
 ## 全屏 TUI（U2，`jarvis/ui/tui.py`，Textual）
 
@@ -209,7 +233,7 @@ QTextBrowser 正文 + 悬停工具栏：复制 / 重新生成）、`ToolCardWidg
 四键：允许一次 / 总是允许 / 拒绝 / 编辑，不再弹 QMessageBox）、
 `ErrorCardWidget`（错误卡：重试只给一次，第二次改“复制问题，
 开新会话”，U6-4）、`NoteWidget`（居中系统提示）。
-右侧是 QTabWidget（会话 / 待办 / Diff / 检查点），顶栏是模型芯片 +
+右侧是 QTabWidget（会话 / 待办 / Diff / 检查点 / 任务），顶栏是模型芯片 +
 档位芯片（点一下 readonly → edit → auto，立即落盘）+ “📋 计划”开关，
 底部状态行（context 条 + 真 token + 费用 + 未返回用量次数）。输入框是
 `ComposerEdit`（QTextEdit，多行自增高 1–6 行，Enter 发送 /
@@ -284,17 +308,25 @@ Markdown 发回 `/api/chat` 的 `plan_markdown` 字段）。批准后
 `plan.to_todos()` 生成 `TodoList`，`attach_todo_tools` 把
 `update_todo` 工具重新绑到这份新清单上（旧闭包指着旧清单，必须重绑），
 执行轮的提示词是“按顺序执行下面的计划，每完成一步调 update_todo 更新
-进度。”，结束时 `verify_plan` 对照验收标准自查（目前只有 CLI 接了
-verify，TUI/GUI/网页版跳过——见交付报告）。
+进度。”（U7 起走 `viewstate.build_execute_prompt`，四方同一份），
+结束时 `verify_plan` 对照验收标准自查——U7 起四个界面都接了：
+CLI 在 `run_plan` 里同步调；TUI 在 `_plan_worker` 里调，报告挂进
+transcript；GUI 在执行轮 `finished` 后起 `VerifyWorker`（QThread）
+跑，报告挂成卡片；网页版在 `mode="execute"` 的 `run_agent` 之后调，
+发 `verify` 事件，失败时带 `error`、不拦 `done`。
 
 `TodoList` 只有三种状态：☐ 待做 / ◐ 进行中 / ☑ 已完成；进行中由
 `active_index()` 派生（第一个未完成项），构造上只能有一个。每次变更
-调 `on_change`，`todo_set` 事件全量重渲染（三个界面同一份清单）。
+调 `on_change`，`todo_set` 事件全量重渲染（四个界面同一份清单）。
 清单持久化在会话目录的 `<会话id>-todos.json`，恢复会话时一起读回。
 
 `make_plan` 多了一个可选的 `on_event=None`（只做透传，行为不变）：
 计划轮里工具事件（比如写调用被拒）也要能到界面上，四个界面都把自己
-的事件回调传进去。
+的事件回调传进去。U7 又多了一个可选的 `usage=None`：计划轮的 token
+以前不进用量统计（`make_plan` 不接 `UsageTracker`，四方全漏），
+现在透传给 `run_agent`；`verify_plan` 同款（验收轮也进统计）。
+网页版 `plan_only` 的 `done` 用量以前硬编码 0，现在按计划轮的真实
+用量返回。
 
 ## Diff 与检查点（U5，`jarvis/safety/diffutil.py` + `jarvis/memory/checkpoint.py`）
 
@@ -320,7 +352,11 @@ untracked 默认不进 stash、还会污染用户的 stash 列表；文件复制
 
 悬停恢复：GUI 的 `MessageBubble` 带 `mounted_at`（挂上去那一刻的
 UTC ISO），点“恢复检查点”调 `rewind_to(mounted_at)`，只回滚文件，
-对话内容不动。CLI 是 `/diff` + `/rewind`。网页版 Diff 抽屉只读查看：
+对话内容不动。CLI 是 `/diff` + `/rewind` + `/rewind-to <序号>`
+（先 `/checkpoints` 看列表，序号 → cutoff 的换算走
+`viewstate.checkpoint_cutoff_for_row`）；TUI 检查点页点一行同样调
+`rewind_to`（U7 修正：列表是倒序展示，以前按展示序号直接算步数，
+选最新一行会把全部检查点都回滚掉）。网页版 Diff 抽屉只读查看：
 Vercel 的 serverless 文件系统是临时的、按实例走，检查点仓库放上去
 行为不一致，所以网页版不做回滚（拒绝全部只给一句说明）。
 

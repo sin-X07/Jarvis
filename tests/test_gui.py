@@ -97,6 +97,30 @@ def test_worker_signals():
     print("[OK] Worker：在 QThread 里跑完流式循环，token/finished 信号都收到了")
 
 
+def test_verify_worker_runs():
+    """U7：VerifyWorker 在线程里调 verify_plan，报告经 verified 信号回来。"""
+    from test_loop import _text_reply
+    from jarvis.memory.planner import Plan
+    from jarvis.ui.worker import VerifyWorker
+
+    _app()
+    plan = Plan(goal="写个问候脚本",
+                steps=[{"title": "写文件", "acceptance": "文件存在",
+                        "done": False}])
+    client = FakeStreamClient([])  # 不用；VerifyWorker 走非流式 create
+    # FakeStreamClient 没有非流式 create：换成 test_loop 的 FakeClient
+    from test_loop import FakeClient
+    client = FakeClient([_text_reply("1. 写文件：通过")])
+    worker = VerifyWorker(client, "deepseek-flash", plan, "做完了")
+    got = {"report": None, "error": None}
+    worker.verified.connect(lambda r: got.update(report=r))
+    worker.failed.connect(lambda e: got.update(error=e))
+    worker.run()  # 同线程直接跑：信号同步投递
+    assert got["error"] is None, got
+    assert got["report"] is not None and "通过" in got["report"], got
+    print("[OK] VerifyWorker：调 verify_plan，验收报告经信号回来")
+
+
 def test_main_window_builds():
     app = _app()
     client = FakeStreamClient([[_chunk("hi")]])
@@ -111,12 +135,41 @@ def test_main_window_builds():
     assert window.permission_label.text().startswith("权限：")
     assert window.context_label.text().startswith("context ")
     assert window.usage_label.text().startswith("用量：")
-    assert window.tabs.count() == 4
-    assert [window.tabs.tabText(i) for i in range(4)] == [
-        "会话", "待办", "Diff", "检查点"]
+    assert window.tabs.count() == 5
+    assert [window.tabs.tabText(i) for i in range(5)] == [
+        "会话", "待办", "Diff", "检查点", "任务"]  # U7：新增“任务”Tab（/jobs）
     assert window.send_button.text() == "发送"
     _close_window(window)
     print("[OK] 主窗口：能建起来，记忆侧栏与欢迎语正常，U3 芯片/状态栏/Tab 都在")
+
+
+def test_main_window_jobs_tab_and_memory_tools():
+    """U7：GUI 接了 jobs/delegate/技能工具；“任务”Tab 能列后台任务；
+    记忆输入框能记住、能删除选中。"""
+    import os as _os
+    import tempfile as _tf
+    app = _app()
+    client = FakeStreamClient([[_chunk("hi")]])
+    tmp = _tf.mkdtemp()
+    facts = FactStore(path=_os.path.join(tmp, "memory.json"))
+    window = MainWindow(client, store=facts)
+    names = {t.get("function", {}).get("name")
+             for t in window._schemas}
+    assert "job_status" in names and "job_result" in names, names
+    assert "delegate" in names, names
+    assert "use_skill" in names, names
+    window.tabs.setCurrentIndex(4)
+    assert window.tabs.tabText(4) == "任务"
+    assert window.jobs_list.count() >= 0
+    before = len(facts.all_texts())
+    window.memory_input.setText("U7 测试记忆")
+    window._remember_fact()
+    assert window.memory_list.count() == before + 1
+    window.memory_list.setCurrentRow(window.memory_list.count() - 1)
+    window._delete_memory()
+    assert window.memory_list.count() == before
+    _close_window(window)
+    print("[OK] GUI：jobs/delegate/技能工具已接线，任务 Tab 与记忆增删正常")
 
 
 def test_main_window_p7_widgets():
@@ -146,6 +199,36 @@ def test_main_window_p7_widgets():
     assert "你好" in window.transcript_text()
     _close_window(window)
     print("[OK] 主窗口 P7：会话列表、设置/新会话按钮、用量标签都在，点会话能恢复成气泡")
+
+
+def test_gui_fork_session():
+    _app()
+    import os as _os
+    import tempfile
+    from jarvis.memory.session_store import SessionStore
+    tmp = tempfile.mkdtemp()
+    store = SessionStore(root=_os.path.join(tmp, "sessions"))
+    sid = store.create(title="测试会话")
+    store.append_event(sid, "user", {"content": "你好"})
+    client = FakeStreamClient([[_chunk("hi")]])
+    window = MainWindow(client, session_store=store)
+    assert window.fork_session_button.text() == "分叉当前会话"
+    window.resume_session(sid)
+    assert window._session_id == sid
+    window.fork_session()
+    new_id = window._session_id
+    assert new_id != sid, new_id
+    assert window.session_list.count() == 2, window.session_list.count()
+    assert window.status_label.text().startswith("已分叉到新会话")
+    assert "你好" in window.transcript_text()
+    # 无会话时点分叉只提示，不建新会话
+    window2 = MainWindow(client, session_store=store)
+    window2.fork_session()
+    assert "先聊一句再分叉" in window2.transcript_text()
+    assert window2.session_list.count() == 2
+    _close_window(window)
+    _close_window(window2)
+    print("[OK] GUI：分叉当前会话（与 CLI /fork、网页分叉对齐），无会话时只提示")
 
 
 def test_settings_dialog():
@@ -557,14 +640,23 @@ def test_gui_diff_grouped_and_bubble_restore():
 def test_gui_diff_and_checkpoint_tabs():
     """Diff Tab：非 git 目录直说看不到改动；检查点 Tab：点一条回滚文件。"""
     import tempfile
+    import jarvis.ui.gui as gui
     from jarvis.memory.checkpoint import CheckpointStore
 
     _app()
     window = MainWindow(FakeStreamClient([[_chunk("hi")]]))
-    window.tabs.setCurrentIndex(2)  # Diff（U4 起 Tab 顺序：会话/待办/Diff/检查点）
-    _pump_until(lambda: "git 仓库" in window.diff_view.toPlainText(), 3000)
-    assert "git 仓库" in window.diff_view.toPlainText(), \
-        window.diff_view.toPlainText()
+    # 本机是 git 仓库且工作区常有改动时，Diff 页会显示真实改动而不是
+    # “不是 git 仓库”；测“非 git 目录”分支必须把 working_tree_diff 打桩
+    #（沙箱工作区不是 git 仓库才碰巧通过；U7 真机验收时在 Sun 的电脑上失败）。
+    old = gui.working_tree_diff
+    gui.working_tree_diff = lambda: "当前目录不是一个 git 仓库。"
+    try:
+        window.tabs.setCurrentIndex(2)  # Diff（U4 起 Tab 顺序：会话/待办/Diff/检查点）
+        _pump_until(lambda: "git 仓库" in window.diff_view.toPlainText(), 3000)
+        assert "git 仓库" in window.diff_view.toPlainText(), \
+            window.diff_view.toPlainText()
+    finally:
+        gui.working_tree_diff = old
     # 造一个检查点：先写文件，再改掉它，点检查点恢复
     tmp = tempfile.mkdtemp()
     target = os.path.join(tmp, "a.txt")
@@ -894,8 +986,11 @@ def _teardown_qt():
 
 if __name__ == "__main__":
     test_worker_signals()
+    test_verify_worker_runs()
     test_main_window_builds()
+    test_main_window_jobs_tab_and_memory_tools()
     test_main_window_p7_widgets()
+    test_gui_fork_session()
     test_settings_dialog()
     test_worker_confirm_flow()
     test_gui_streaming_bubbles()

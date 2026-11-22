@@ -169,6 +169,21 @@ def test_tui_boots_sizes():
     print("[OK] TUI：120×40 与 80×24 启动正常（截图已存临时目录 tui-*.svg），60 列侧栏自动收起")
 
 
+def test_tui_launchpad_hint_from_viewstate():
+    """空态提示走 viewstate.EMPTY_HINTS（U7 验收补修）。"""
+    from jarvis.ui.viewstate import EMPTY_HINTS, EMPTY_TAGLINE
+    async def _run():
+        app = _make_app([[_chunk("hi")]])
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            hint = pilot.app.query_one("#launchpad-hint", Static)
+            text = str(hint.render())
+            assert EMPTY_TAGLINE in text, text
+            assert EMPTY_HINTS[0] in text, text
+    asyncio.run(_run())
+    print("[OK] TUI：空态提示来自 viewstate（与网页/GUI 同一份）")
+
+
 def test_tui_streaming_and_status():
     async def _run():
         app = _make_app([[_chunk("你好"), _chunk("呀")]])
@@ -436,6 +451,26 @@ def test_tui_apply_setup_writes_temp_dotenv():
     print("[OK] TUI：apply_setup 把 key 写进 .env（测试用临时路径）")
 
 
+def test_tui_regenerate():
+    """U7：/regenerate 重新生成上一条回答（GUI/网页已有，TUI 补齐）。"""
+    async def _run():
+        app = _make_app([[_chunk("第一次")], [_chunk("第二次")]])
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _send(pilot, "你好")
+            ok = await _wait_for(
+                pilot, lambda: not pilot.app.busy
+                and "第一次" in _all_text(pilot))
+            assert ok, "第一轮没跑完"
+            await _send(pilot, "/regenerate")
+            ok = await _wait_for(
+                pilot, lambda: not pilot.app.busy
+                and "第二次" in _all_text(pilot))
+            assert ok, "重新生成没跑出第二次回答"
+    asyncio.run(_run())
+    print("[OK] TUI：/regenerate 重新生成上一条回答")
+
+
 def test_tui_plan_approve_executes_and_ticks_todos():
     """U4-1/U4-2：/plan 出卡片，按 a 批准后执行，待办实时打勾。"""
     from jarvis.ui.tui import PlanCard
@@ -470,6 +505,39 @@ def test_tui_plan_approve_executes_and_ticks_todos():
             assert "◐ 跑一遍" in text, text
     asyncio.run(_run())
     print("[OK] TUI：/plan 出卡片，按 a 批准执行，待办实时打勾")
+
+
+def test_tui_plan_approve_verifies():
+    """U7：/plan 批准执行完，对照验收标准检查，报告挂进 transcript
+    （以前 TUI 只 import 了 verify_plan，从没调过）。"""
+    from jarvis.ui.tui import PlanCard
+
+    plan_text = ("目标：写个问候脚本\n步骤：\n"
+                 "1. 写文件 —— 验收：文件存在\n"
+                 "2. 跑一遍 —— 验收：输出问候\n风险：\n- 无\n")
+
+    async def _run():
+        app = _make_app([], client=PlanFakeClient(plan_text, [
+            [_chunk(tool_calls=[_tool_delta(
+                0, "c1", "update_todo", '{"index": 1}')])],
+            [_chunk("做完了。")],
+        ]))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            await _send(pilot, "/plan 写个问候脚本")
+            ok = await _wait_for(
+                pilot, lambda: pilot.app.query(PlanCard))
+            assert ok, "计划卡片没出现"
+            await pilot.press("a")
+            ok = await _wait_for(
+                pilot, lambda: not pilot.app.busy
+                and "验收检查" in _all_text(pilot))
+            assert ok, "批准执行完没出验收检查"
+            # 验收轮的 token 也进了用量（PlanFakeClient 的非流式调用
+            # 没有 usage，这里不断言数值，只断言验收跑了）
+            assert "做完了" in _all_text(pilot)
+    asyncio.run(_run())
+    print("[OK] TUI：/plan 批准执行完出验收检查")
 
 
 def test_tui_plan_reject_does_not_execute():
@@ -586,6 +654,7 @@ if __name__ == "__main__":
     test_git_branch_no_crash()
     test_save_key_to_dotenv()
     test_tui_boots_sizes()
+    test_tui_launchpad_hint_from_viewstate()
     test_tui_streaming_and_status()
     test_tui_thinking_box()
     test_tui_tool_card_and_ctrl_o()
@@ -596,8 +665,10 @@ if __name__ == "__main__":
     test_tui_sidebar_toggle()
     test_tui_typing_inserts_text()
     test_tui_commands()
+    test_tui_regenerate()
     test_tui_apply_setup_writes_temp_dotenv()
     test_tui_plan_approve_executes_and_ticks_todos()
+    test_tui_plan_approve_verifies()
     test_tui_plan_reject_does_not_execute()
     test_tui_diff_grouped_and_reject()
     test_tui_light_theme_applies()

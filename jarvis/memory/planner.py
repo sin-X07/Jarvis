@@ -95,26 +95,35 @@ def parse_plan(text: str) -> Plan:
 
 
 def make_plan(client, model: str, task: str, extra_tools=None,
-              extra_funcs=None, max_steps: int = 8, on_event=None) -> Plan:
+              extra_funcs=None, max_steps: int = 8, on_event=None,
+              usage=None) -> Plan:
     """跑一轮只读循环，让模型调研并输出计划，解析后返回 Plan。
 
     on_event 透传给 run_agent：计划轮里工具被拦等事件也能让界面
-    看到（比如网页版的工具卡片），不传就静默。"""
+    看到（比如网页版的工具卡片），不传就静默。
+    usage 透传给 run_agent：计划轮的 token 也进用量统计（U7 补：
+    以前 make_plan 不接 UsageTracker，计划轮的 token 四方全漏）。
+    """
     from jarvis.core.agent import run_agent
 
     answer = run_agent(
         client, PLAN_INSTRUCTION + "\n任务：" + task,
         model=model, max_steps=max_steps, verbose=False,
         extra_tools=extra_tools, extra_funcs=extra_funcs,
-        read_only=True, on_event=on_event)
+        read_only=True, on_event=on_event, usage=usage)
     plan = parse_plan(answer)
     if not plan.goal:
         plan.goal = task
     return plan
 
 
-def verify_plan(client, model: str, plan: Plan, result_text: str) -> str:
-    """执行完对照验收标准检查：返回模型写的逐项检查报告。"""
+def verify_plan(client, model: str, plan: Plan, result_text: str,
+                usage=None) -> str:
+    """执行完对照验收标准检查：返回模型写的逐项检查报告。
+
+    usage 透传给 run_agent：验收轮的 token 也进用量统计（与 make_plan
+    同款缺口，U7 一并补）。
+    """
     from jarvis.core.agent import run_agent
 
     checks = "\n".join(
@@ -123,4 +132,5 @@ def verify_plan(client, model: str, plan: Plan, result_text: str) -> str:
     prompt = ("对照下面的验收标准，检查执行结果，逐项写“通过”或“未通过 + 原因”。"
               "只写检查结果，不要重做任务。\n\n验收标准：\n" + checks +
               "\n\n执行结果：\n" + result_text)
-    return run_agent(client, prompt, model=model, max_steps=3, verbose=False)
+    return run_agent(client, prompt, model=model, max_steps=3, verbose=False,
+                     usage=usage)

@@ -107,6 +107,17 @@ def test_index_and_health():
     print("[OK] 网页版：GET / 返回聊天页，/api/health 正常")
 
 
+def test_index_empty_state_from_viewstate():
+    """空态文案走 viewstate（U7 验收补修）：页面里出现 EMPTY_HINTS 的例句。"""
+    from jarvis.ui.viewstate import EMPTY_HINTS, EMPTY_TAGLINE
+    client = _client_with([])
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert EMPTY_TAGLINE in resp.text, resp.text[:500]
+    assert EMPTY_HINTS[0] in resp.text, "空态文案未从 viewstate 注入"
+    print("[OK] 网页版：空态文案来自 viewstate（与 TUI/GUI 同一份）")
+
+
 def test_chat_stream_text():
     client = _client_with([
         [_chunk("你好"), _chunk("，我是 Jarvis。")],
@@ -427,6 +438,54 @@ def test_chat_execute_with_edited_plan_markdown():
     print("[OK] 网页版 U4：改过的计划文本优先建待办")
 
 
+def test_chat_execute_emits_verify():
+    """U7：mode=execute 执行完发 verify 事件（验收报告），验收轮的
+    token 也进 done 的用量；验收失败时 verify 带 error、done 照常发。"""
+    client = _client_with_hybrid([
+        _text_reply("1. 写文件：通过\n2. 跑一遍：通过",
+                    usage=SimpleNamespace(prompt_tokens=20,
+                                          completion_tokens=8,
+                                          total_tokens=28)),
+    ], [
+        [_chunk("做完了")],
+    ])
+    resp = client.post("/api/chat", json={
+        "message": "写个问候脚本", "history": [], "facts": [],
+        "api_key": "sk-test", "mode": "execute",
+        "plan": {"goal": "写个问候脚本",
+                 "steps": [{"title": "写文件", "acceptance": "文件存在"},
+                           {"title": "跑一遍", "acceptance": "输出问候语"}],
+                 "risks": ["无"]}})
+    assert resp.status_code == 200, resp.text[:200]
+    events = _parse_sse(resp.text)
+    verify = [d for e, d in events if e == "verify"]
+    assert len(verify) == 1 and "通过" in verify[0]["report"], events
+    done = [d for e, d in events if e == "done"]
+    assert len(done) == 1 and done[0]["answer"] == "做完了", events
+    assert done[0]["usage"]["tokens"] == 28, done[0]["usage"]
+    print("[OK] 网页版 U7：执行完发 verify 事件，验收轮 token 进用量")
+
+
+def test_chat_plan_only_usage_counts_plan_tokens():
+    """U7：mode=plan 的 done 用量不再硬编码 0，计划轮的真实用量进统计。"""
+    client = _client_with_hybrid([
+        _text_reply(PLAN_TEXT,
+                    usage=SimpleNamespace(prompt_tokens=10,
+                                          completion_tokens=5,
+                                          total_tokens=15)),
+    ], [])
+    resp = client.post("/api/chat", json={
+        "message": "写个问候脚本", "history": [], "facts": [],
+        "api_key": "sk-test", "mode": "plan"})
+    assert resp.status_code == 200, resp.text[:200]
+    events = _parse_sse(resp.text)
+    done = [d for e, d in events if e == "done"]
+    assert len(done) == 1 and done[0]["plan_only"] is True, events
+    assert done[0]["usage"]["tokens"] == 15, done[0]["usage"]
+    assert done[0]["usage"]["prompt_tokens"] == 10, done[0]["usage"]
+    print("[OK] 网页版 U7：plan_only 的 done 用量是计划轮的真实 token")
+
+
 def test_api_diff():
     """U5-3：GET /api/diff 返回按文件分组的改动；非 git 目录给提示。"""
     from test_diffutil import GIT_DIFF
@@ -480,6 +539,7 @@ def test_chat_tool_card_phases():
 if __name__ == "__main__":
     test_no_pyside()
     test_index_and_health()
+    test_index_empty_state_from_viewstate()
     test_chat_stream_text()
     test_chat_tool_call()
     test_chat_uses_provided_key()
@@ -496,6 +556,8 @@ if __name__ == "__main__":
     test_chat_plan_mode_blocks_write()
     test_chat_execute_runs_plan_and_ticks_todos()
     test_chat_execute_with_edited_plan_markdown()
+    test_chat_execute_emits_verify()
+    test_chat_plan_only_usage_counts_plan_tokens()
     test_api_diff()
     test_chat_tool_card_phases()
     test_index_has_u6_ui()

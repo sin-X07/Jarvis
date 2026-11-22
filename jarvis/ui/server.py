@@ -45,6 +45,7 @@ from jarvis.safety.diffutil import parse_diff
 from jarvis.tools.tools import working_tree_diff
 from jarvis.ui.events import summarise_tool_call, tool_risk
 from jarvis.ui.theme import load_theme, to_css_vars
+from jarvis.ui.viewstate import EMPTY_HINTS, EMPTY_TAGLINE
 
 # 网页版默认最多 6 步：Vercel 免费版函数最长跑 60 秒，步数太多容易超时。
 WEB_MAX_STEPS = 6
@@ -95,9 +96,11 @@ def _run_agent_streamed(client, user_message, messages, schemas, funcs,
     those events to the browser while they happen, the loop runs in a
     worker thread and the SSE generator yields from the queue.
     mode="plan"：只读调研出计划（make_plan），发 plan_ready 事件，不执行；
-    mode="execute"：按已批准的计划执行，update_todo 变动发 todo_set 事件；
-    mode="chat"：普通对话。plan 轮的 token 不进 usage（make_plan 不接
-    UsageTracker），done 里 plan_only 时前端不刷新用量行。
+    mode="execute"：按已批准的计划执行，update_todo 变动发 todo_set 事件，
+        执行完调 verify_plan 对照验收标准检查，发 verify 事件；
+    mode="chat"：普通对话。计划轮与验收轮的 token 都进 usage（U7：
+        make_plan/verify_plan 现在接 UsageTracker）；done 里 plan_only
+        时用量行按计划轮的真实用量刷新，不再硬编码 0。
     """
     events = queue.Queue()
 
@@ -113,16 +116,19 @@ def _run_agent_streamed(client, user_message, messages, schemas, funcs,
                 plan_obj = make_plan(
                     client, MODEL, user_message,
                     extra_tools=schemas, extra_funcs=funcs,
-                    max_steps=WEB_MAX_STEPS, on_event=on_event)
+                    max_steps=WEB_MAX_STEPS, on_event=on_event,
+                    usage=tracker)
                 events.put(("plan_ready", {
                     "markdown": plan_obj.render(), "goal": plan_obj.goal,
                     "steps": plan_obj.steps, "risks": plan_obj.risks}))
                 events.put(("done", {
                     "answer": "", "plan_only": True,
                     "history": messages[1:], "facts": STORE.all_texts(),
-                    "usage": {"tokens": 0, "prompt_tokens": 0,
-                              "completion_tokens": 0, "unknown_calls": 0,
-                              "cost_cny": 0},
+                    "usage": {"tokens": tracker.total_tokens,
+                              "prompt_tokens": tracker.prompt_tokens,
+                              "completion_tokens": tracker.completion_tokens,
+                              "unknown_calls": tracker.unknown_calls,
+                              "cost_cny": round(tracker.cost_cny, 4)},
                     "duration_ms": round((time.monotonic() - started) * 1000),
                 }))
                 return
@@ -152,6 +158,17 @@ def _run_agent_streamed(client, user_message, messages, schemas, funcs,
                 on_event=on_event, stream=True, verbose=False,
                 max_steps=WEB_MAX_STEPS, usage=tracker,
             )
+            if mode == "execute":
+                # U7：执行完对照验收标准检查（以前网页版从没验过）。
+                # 验收失败不拦本轮：done 照常发，verify 事件带 error。
+                try:
+                    from jarvis.memory.planner import verify_plan
+                    report = verify_plan(
+                        client, MODEL, plan_obj, answer, usage=tracker)
+                    events.put(("verify", {"report": report}))
+                except Exception as exc:  # noqa: BLE001
+                    events.put(("verify", {"report": "",
+                                           "error": str(exc)}))
             # 整轮裁剪后把更新过的历史（不含 system）交给 done 事件
             mem = ConversationMemory(_system_prompt())
             mem.messages = messages
@@ -422,6 +439,7 @@ INDEX_HTML = """<!DOCTYPE html>
     <div class="side-head"><span>会话</span><button id="collapse-side" title="收起侧栏">«</button></div>
     <input id="search" placeholder="搜索会话…" autocomplete="off">
     <button id="newsession">＋ 新会话</button>
+    <button id="forksession" title="把当前会话另存一份（继续聊，分叉）">⑂ 分叉</button>
     <ul id="sessions"></ul>
     <div id="todos"><h3>待办</h3><ul id="todo-list"><li>（清单是空的，规划模式出计划后出现在这里）</li></ul></div>
     <button id="settings-toggle">⚙ 设置</button>
@@ -922,6 +940,25 @@ function newSession() {
   statusEl.textContent = '新会话';
 }
 
+// U7：分叉当前会话（与 CLI/TUI 的 /fork 对齐）：复制历史与事实到
+// 一个新会话并切过去，原会话不动。
+function forkSession() {
+  if (busy) return;
+  const src = sessions[currentSession] || { title: '新会话', history: [], facts: [] };
+  const id = 's' + Date.now().toString(36);
+  sessions[id] = {
+    title: ((src.title || '新会话') + '（分叉）').slice(0, 20),
+    history: JSON.parse(JSON.stringify(src.history || [])),
+    facts: JSON.parse(JSON.stringify(src.facts || [])),
+  };
+  currentSession = id;
+  history = sessions[id].history;
+  facts = sessions[id].facts;
+  save();
+  redraw();
+  statusEl.textContent = '已分叉到新会话';
+}
+
 function setUsageLine(text, ctxPct) {
   usageEl.firstChild.textContent = text;
   if (ctxPct === null || ctxPct === undefined) {
@@ -1043,6 +1080,15 @@ async function send(textOverride, opts) {
           statusEl.textContent = '计划已出，等批准';
         } else if (event === 'todo') {
           renderTodos(payload.todos);
+        } else if (event === 'verify') {
+          // U7：计划执行完的验收报告（与 CLI/TUI/GUI 同款内容）。
+          const note = document.createElement('div');
+          note.className = 'msg jarvis';
+          note.textContent = payload.report
+            ? '验收检查：\n' + payload.report
+            : '验收检查失败：' + (payload.error || '未知错误');
+          chatEl.appendChild(note);
+          chatEl.scrollTop = chatEl.scrollHeight;
         } else if (event === 'done') {
           sawDone = true;
           errorStreak = 0;  // 本轮成功：连续出错清零（U6-4）
@@ -1050,8 +1096,15 @@ async function send(textOverride, opts) {
           facts = payload.facts;
           save();
           if (payload.plan_only) {
-            // 计划轮：没有回答气泡，也不刷新用量行（计划轮 token 不进 usage）
+            // 计划轮：没有回答气泡；用量行按计划轮的真实用量刷新
+            //（U7 以前这里硬编码 0，计划轮 token 全漏）。
             sawPlanOnly = true;
+            const u = payload.usage || {};
+            setUsageLine('用量：本次 ' + (u.tokens || 0) + ' tokens（输入 '
+              + (u.prompt_tokens ?? '—') + ' / 输出 ' + (u.completion_tokens ?? '—')
+              + '），约 ¥' + (u.cost_cny || 0).toFixed(4)
+              + (u.unknown_calls ? '（' + u.unknown_calls + ' 次未返回用量）' : ''),
+              lastCtxPct);
             statusEl.textContent = '计划已出，等批准';
           } else {
             if (bubble && payload.answer) bubbleBody.innerHTML = md2html(payload.answer);
@@ -1132,6 +1185,7 @@ document.getElementById('reconnect').addEventListener('click', () => {
   if (lastUserText) send(lastUserText);
 });
 document.getElementById('newsession').addEventListener('click', newSession);
+document.getElementById('forksession').addEventListener('click', forkSession);
 document.getElementById('shortcuts-toggle').addEventListener('click', () => {
   const el = document.getElementById('shortcuts');
   el.hidden = !el.hidden;
@@ -1279,6 +1333,10 @@ INDEX_HTML = INDEX_HTML.replace(
     "/*__THEME_VARS_LIGHT__*/",
     to_css_vars(load_theme("light")).replace(":root", "html[data-theme=\"light\"]", 1))
 INDEX_HTML = INDEX_HTML.replace("<!--__MODEL__-->", MODEL)
+# 空态文案走 viewstate（四界面同一份；主题/模型注入同款做法）。
+INDEX_HTML = INDEX_HTML.replace(
+    "能记住事情、读写文件、跑命令。直接说话，或者先记住点什么。",
+    EMPTY_TAGLINE + " " + EMPTY_HINTS[0])
 
 
 @app.get("/")
@@ -1355,6 +1413,8 @@ def chat(req: ChatRequest):
                     yield _sse_event("plan", payload)
                 elif kind == "todo_set":
                     yield _sse_event("todo", payload)
+                elif kind == "verify":
+                    yield _sse_event("verify", payload)
                 elif kind == "status":
                     yield _sse_event("status", payload)
                 elif kind == "tool_start":

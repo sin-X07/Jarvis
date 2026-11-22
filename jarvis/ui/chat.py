@@ -18,6 +18,7 @@
 """
 
 import argparse
+import os
 import sys
 
 from jarvis.core.agent import MODEL, SYSTEM_PROMPT, build_client, run_agent
@@ -40,6 +41,7 @@ from jarvis.safety.diffutil import render_diff_grouped
 from jarvis.tools.tools import register_before_write_hook, working_tree_diff
 from jarvis.ui.trajectory import render_trajectory
 from jarvis.ui.update import check_update, format_update
+from jarvis.ui.viewstate import build_execute_prompt, checkpoint_cutoff_for_row
 from jarvis.core.usage import UsageTracker, daily_summary
 from jarvis.runtime.jobs import JobManager, jobs_tools
 
@@ -54,6 +56,8 @@ HELP = """命令：
   /plan <任务>       规划模式：先出计划，确认后再执行，结束时验验收标准
   /diff              显示工作区当前改动（按文件分组，含未跟踪文件）
   /rewind [n]        恢复最近 n 个文件检查点（默认 1）
+  /rewind-to <序号>  回到 /checkpoints 里第 n 个检查点之前（rewind_to）
+  /checkpoints       列出当前会话的检查点（带序号，给 /rewind-to 用）
   /clear             清空本轮对话历史（长期记忆不受影响）
   /jobs              列出后台任务
   /usage             最近 7 天用量小结
@@ -340,6 +344,38 @@ def handle_command(session: CliSession, text: str) -> bool:
                 print(f"  {path}")
         else:
             print("没有可恢复的检查点。")
+    elif cmd == "checkpoints":
+        if not session.checkpoints:
+            print("当前会话还没有检查点。")
+            return True
+        rows = session.checkpoints.list_checkpoints()
+        if not rows:
+            print("没有检查点。")
+            return True
+        for i, row in enumerate(rows, 1):
+            ts = row.get("ts", "")[:19].replace("T", " ")
+            print(f"  {i}. {ts}  {os.path.basename(row.get('path', ''))}")
+    elif cmd == "rewind-to":
+        if not session.checkpoints:
+            print("当前会话还没有检查点。")
+            return True
+        try:
+            index = int(arg) - 1
+        except ValueError:
+            print("用法：/rewind-to <序号>，序号见 /checkpoints。")
+            return True
+        rows = session.checkpoints.list_checkpoints()
+        cutoff = checkpoint_cutoff_for_row(rows, index)
+        if cutoff is None:
+            print("没有这个序号的检查点，先 /checkpoints 看列表。")
+            return True
+        restored = session.checkpoints.rewind_to(cutoff)
+        if restored:
+            print("已恢复到该检查点之前：")
+            for path in restored:
+                print(f"  {path}")
+        else:
+            print("没有可恢复的检查点。")
     elif cmd == "clear":
         session.memory.clear()
         print("本轮对话已清空，长期记忆还在。")
@@ -402,7 +438,8 @@ def run_plan(session: CliSession, task: str) -> None:
     plan = make_plan(session.client, session.model, task,
                      extra_tools=session.extra_tools,
                      extra_funcs=session.extra_funcs,
-                     max_steps=session.max_steps, on_event=_plan_event)
+                     max_steps=session.max_steps, on_event=_plan_event,
+                     usage=session.usage)
     while True:
         print()
         print("计划卡片：")
@@ -424,19 +461,19 @@ def run_plan(session: CliSession, task: str) -> None:
                              extra_tools=session.extra_tools,
                              extra_funcs=session.extra_funcs,
                              max_steps=session.max_steps,
-                             on_event=_plan_event)
+                             on_event=_plan_event, usage=session.usage)
             continue
         print("只认 y / e / n。")
     session._set_todo(plan.to_todos())
     print("\n待办：\n" + session.todo.render())
-    prompt = (f"按顺序执行下面的计划，每完成一步调 update_todo 更新进度。"
-              f"\n\n{plan.render()}\n\n任务：{task}")
+    prompt = build_execute_prompt(plan.render(), task)
     answer = session.ask(prompt)
     print()
     print(to_ansi(answer, use_color=session.use_color))
     print()
     print("正在对照验收标准检查…")
-    report = verify_plan(session.client, session.model, plan, answer)
+    report = verify_plan(session.client, session.model, plan, answer,
+                         usage=session.usage)
     print(report)
 
 
