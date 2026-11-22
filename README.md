@@ -1,260 +1,61 @@
-# Jarvis — Personal Agent（Python 版，0.2.0）
+# Jarvis — Personal Agent（Python，0.2.0）
 
-一个能跑的个人助手：用 DeepSeek 的 API，通过 agent loop
-（思考 → 调工具 → 看结果 → 再思考）回答问题、改文件、跑命令、
-做规划。四个界面（命令行 / 全屏终端 TUI / 桌面 GUI / 网页）共用同一个核心。
+DeepSeek 驱动的个人助手：agent loop（思考 → 调工具 → 看结果 → 再思考），能回答问题、改文件、跑命令、做规划。四个界面（命令行 / 全屏终端 / 桌面 / 网页）共用同一个核心。
+
+线上网页版（不用安装，直接用）：https://jarvis-two-rho-72.vercel.app/
+
+## 状态
+
+0.2.0 已完成：记忆层、工具箱、规划模式、文件检查点、四界面、Vercel 部署。2026-11-22 刚做完两轮打磨：U0–U6 界面优化（事件模型、真实用量、全屏 TUI、桌面重写、计划/待办、Diff/检查点、浅色主题），U7 四界面统一（功能对照表、缺口补齐、共用视图状态层）。下一步：语音输入/输出、浏览器里直调 DeepSeek（BYOK 不再经过服务器转发）、向量检索替代关键词检索。更新日志见 `CHANGELOG.md`。
 
 ## 快速开始
 
 ```powershell
-# 1. 建虚拟环境并装依赖
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements-gui.txt   # 桌面版；只要命令行装 requirements.txt
+pip install -r requirements.txt              # 命令行 / TUI / 网页版
+pip install -r requirements-gui.txt          # 再加这个才有桌面版（PySide6）
 
-# 2. 配 key：复制 .env.example 为 .env，填入你的 DeepSeek API key
-#    key 在 https://platform.deepseek.com/api_keys 创建
-
-# 3. 先验证 key 能通
-python tests/smoke_test.py
-
-# 4. 跑起来（在项目根目录下跑）
-python -m jarvis.ui.chat                        # 交互式对话
-python -m jarvis.ui.chat --print "现在几点？"    # 一次问答
-python -m jarvis.ui.tui                         # 全屏终端（非 TTY 时自动回落到命令行）
-python -m jarvis.ui.gui                         # 桌面版
-uvicorn jarvis.ui.server:app --reload           # 网页版，打开 http://127.0.0.1:8000/
-
-# 5. 离线测试（不用 key、不联网）
-python run_tests.py                   # 全量测试，24 个文件 192 项
+copy .env.example .env                        # 填入 DEEPSEEK_API_KEY
+python tests/smoke_test.py                   # 验证 key 能通
 ```
 
-Windows 上也可以直接用打包好的 exe：打 tag 后 GitHub Actions 自动出
-`jarvis.exe`（命令行）和 `jarvis-gui.exe`（桌面版）、`jarvis-tui.exe`（全屏终端版），挂在 release 上；
-本地打包跑 `.\build-exe.ps1`。
+key 在 https://platform.deepseek.com/api_keys 创建。模型 id 是 `deepseek-flash`（不要发 `deepseek-v4.1-1017`，那是权重版本号，不是 API 模型名）；base URL 默认 `https://api.deepseek.com`。
 
-## 模型名注意
+## 四种运行方式
 
-DeepSeek 官方 API 上，DeepSeek-V4.1-Flash-1017 的模型 id 是
-`deepseek-flash`（旧 id `deepseek-v4-flash` 也能用，会路由到同一版本）。
-不要发 `deepseek-v4.1-1017`——那是权重版本号，不是 API 模型名。
-默认 base URL：`https://api.deepseek.com`。
-
-## 命令行
-
-```
-jarvis --print "问题"        一次问答，只打答案
-jarvis --sessions            列出会话
-jarvis --resume <id 前缀>     恢复一个会话继续聊
-jarvis --usage               最近 7 天用量小结
-jarvis --trajectory <id>     看一个会话的轨迹
-jarvis --update              检查 GitHub 上有没有新版
-jarvis --version             打印版本号
-```
-
-交互里输入 `/help` 看全部命令。最常用的几个：
-
-| 命令 | 干什么 |
-| --- | --- |
-| `/plan <任务>` | 规划模式：先调研出计划，确认后执行，结束对照验收标准自查 |
-| `/todo` | 看待办清单（执行计划时模型自己更新） |
-| `/rewind [n]` | 恢复最近 n 个文件检查点（写文件前自动备份） |
-| `/resume [id]` / `/fork` / `/sessions` | 恢复 / 分叉 / 列出会话 |
-| `/remember <内容>` / `/memory` / `/forget <内容>` | 长期记忆 |
-| `/model [名字]` / `/status` / `/permission [档位]` | 换模型 / 看状态 / 换权限档位 |
-| `/jobs` / `/usage` / `/trajectory` | 后台任务 / 用量 / 当前会话轨迹 |
-| `/clear` / `/quit` | 清空本轮对话 / 退出 |
-
-## 权限三档
-
-| 档位 | 读文件/读命令 | 写文件/写命令 | 危险命令 |
+| 界面 | 启动 | 适合 | 要知道 |
 | --- | --- | --- | --- |
-| `readonly` | 允许 | 拒绝 | 拒绝 |
-| `edit`（默认） | 允许 | 内嵌确认卡片（写文件前先给你看 diff） | 拒绝 |
-| `auto` | 允许 | 直接放行 | 拒绝 |
+| **命令行 CLI** | `python -m jarvis.ui.chat`（`pip install -e .` 后直接用 `jarvis` 命令） | 脚本、一次问答、服务器上跑 | `jarvis --print "问题"` 只打答案；交互里 `/help` 看全部命令；`/plan` 规划、`/rewind` 恢复检查点、`/usage` 看用量 |
+| **全屏终端 TUI** | `python -m jarvis.ui.tui` | 终端里长时间用 | 四层布局（顶栏 / 聊天流 / 输入框 / 状态栏），右侧栏 Tab 页（会话 / 待办 / Diff / 检查点），分隔条可拖；危险操作单键确认（`a` 允许一次 / `A` 总是允许 / `d` 拒绝 / `e` 编辑）；`?` 看快捷键；`/theme` 切深浅色；非 TTY 时自动回落到命令行 |
+| **桌面 GUI** | `python -m jarvis.ui.gui`，或双击 `dist\jarvis-gui.exe` | 日常主力 | 气泡聊天 + 右侧 Tab 页（会话 / 待办 / Diff / 检查点 / 任务）；写文件前行内确认卡片（不再弹框）；顶栏模型与权限芯片、底部真 token / 费用；没 key 时弹首次启动向导；窗口尺寸会记住 |
+| **网页版** | 本地 `uvicorn jarvis.ui.server:app`，打开 http://127.0.0.1:8000/；线上直接打开上面的 Vercel 地址 | 给别人用、手机上用 | **key 各用各的（BYOK）**：页面上方填自己的 DeepSeek key，只存自己浏览器，服务器不存不记；无检查点（Vercel 无磁盘）、Diff 只读、默认最多 6 步（函数 60 秒上限） |
 
-危险命令（`rm -rf /`、`format`、`del /s`、`reg delete` 等）任何档位都拒绝。
-切换：CLI 里 `/permission auto`，或 GUI 设置对话框。
-配置优先级：命令行参数 > 环境变量 > `~/.jarvis/config.json` > 默认值。
+exe 本地打包：`.\build-exe.ps1` 出 `dist\jarvis.exe`、`jarvis-gui.exe`、`jarvis-tui.exe`；打 tag 后 GitHub Actions 也会自动出 release。
 
-## 工具
+## 能做什么
 
-文件、Shell、Git、搜索、记忆、委派、后台任务、技能、MCP 工具都在
-`jarvis/tools/tools.py` / `jarvis/runtime/subagent.py` /
-`jarvis/runtime/jobs.py` / `jarvis/extensions/skills.py` /
-`jarvis/extensions/mcp_client.py` 里。
-安全边界：文件工具只能动项目内的文件（`../` 越狱路径会被拦）；
-Shell 先过危险命令黑名单和工作区检查，写操作要确认，输出截断、
-超时 30 秒（可配），环境变量里不带 key；每一步都写审计日志
-`~/.jarvis/audit.jsonl`（只记动作和结果，不记对话内容和 key）。
+- **工具**：读/写/查文件、Shell、Git、取网页、搜索、记忆、委派子代理、后台任务、技能、MCP。文件工具只能动项目内文件；Shell 过危险命令黑名单，写操作要确认；每一步写审计日志（只记动作，不记内容和 key）。
+- **规划模式**：`/plan <任务>` 先调研出带验收标准的计划，确认后执行，待办自动更新，结束对照验收标准自查（四个界面都有）。
+- **记忆**：短期记忆按整轮裁剪、超上限自动压缩摘要；长期事实存 `memory.json`，启动时拼进 system prompt；会话存在 `~/.jarvis/sessions/`，关掉再开能接着聊（网页版存在浏览器 localStorage）。
+- **检查点**：写文件前自动备份，`/rewind`、`/rewind-to <序号>` 或 GUI/TUI 的检查点页点一行恢复，只保留最近 50 个（网页版没有）。
+- **权限三档**：`readonly`（只读）、`edit`（默认，写前确认）、`auto`（写直接放行）；危险命令（`rm -rf /`、`format` 等）任何档位都拒绝。
+- **用量**：数字全是 API 返回的真值（流式 `include_usage`），拿不到显示“—”，绝不估算；`jarvis --usage` 看最近 7 天。
 
-## 会话、记忆、规划
+## 网页版（在线使用）
 
-- **会话**：桌面版和 CLI 的会话存在 `~/.jarvis/sessions/`，一个会话一个
-  `.jsonl` 文件，关掉再开能接着聊；网页版的会话存在浏览器 localStorage。
-- **短期记忆**：`ConversationMemory` 按“整轮”裁掉最旧的对话（绝不断开
-  tool 调用链）；上下文超上限 70% 时自动把旧对话压缩成摘要。
-- **长期记忆**：`FactStore` 把事实存进 `memory.json`，启动时拼进 system
-  prompt；模型也可以主动调 `remember_fact` / `recall_facts` 读写；
-  事实超过 10 条时按问题检索，只拼最相关的 5 条。
-- **规划模式**：`/plan` 先调研出带验收标准的计划，确认后执行，待办清单
-  自动更新，结束时对照验收标准自查一遍（四个界面都验；验收报告挂进
-  对话流，CLI/TUI 打印、GUI 挂卡片、网页版发 `verify` 事件）。
-  计划轮和验收轮的 token 也进用量统计。
-- **检查点**：写文件前自动备份在 `~/.jarvis/checkpoints/<会话id>/`，
-  `/rewind`、`/rewind-to <序号>`（先 `/checkpoints` 看列表）或 GUI/TUI
-  的检查点页点一行恢复，只保留最近 50 个。网页版没有检查点（无磁盘），
-  只有“撤销上一轮”（删浏览器里最后一问一答）。
+直接打开 https://jarvis-two-rho-72.vercel.app/ 就能用，不用安装。
 
-## 技能、MCP、Hooks、插件
+页面上方填自己的 DeepSeek key（BYOK）：key 只存在你自己的浏览器里，每次请求一起发过来，服务器不存、不记；没 key 会报 400，提示填 key。
 
-- **技能**：`skills/` 里的 `.md` 文件就是技能：开头写 `name:` 和
-  `description:`，正文是执行流程。直接说“按 code-review 技能评审一下
-  这次改动”，模型会先读技能全文再干活。自己的技能放 `~/.jarvis/skills/`，
-  也会被自动发现。内置 4 个：`code-review`、`write-tests`、
-  `project-onboarding`、`github-trending-summary`。
-- **MCP**：`mcp.json`（项目里或 `~/.jarvis/mcp.json`）配 MCP 服务器，
-  它们的工具会接进来，名字是 `mcp__<服务器>_<工具>`。示例见
-  `mcp.json.example`（filesystem + github，需要 `npx` 和 GitHub token）。
-- **Hooks**：`~/.jarvis/hooks.json`，三个时机点 `before_write` /
-  `before_shell` / `on_session_end`，每条是一条 shell 命令；
-  `before_write` 的钩子返回非零就拦住写入。
-- **插件**：`plugins/` 里放一个 `.py`，定义 `TOOL_SCHEMA` + `TOOL_FUNC`，
-  就是一个新工具，不用改核心代码。
+在线版的限制：没有文件检查点（Vercel 无磁盘）、Diff 只读、默认最多 6 步（一轮对话调太多工具可能超时）。想用完整版，用上面四种方式里的命令行 / TUI / GUI 在本地跑。
 
-## 全屏终端（TUI）
+## 测试与开发
 
-`python -m jarvis.ui.tui`：四层布局（顶栏 / 聊天流 / 输入框 / 状态栏），
-右侧栏是 Tab 页（会话 / 待办 / Diff / 检查点），分隔条可拖。流式回答
-带光标，工具调用是可折叠卡片（Ctrl+O），思考过程可展开。危险操作按
-单键确认：`a` 允许一次 / `A` 总是允许 / `d` 拒绝 / `e` 编辑。`/plan`
-先出计划卡片，`a` 批准执行，执行完出验收检查。`?` 看快捷键总览，`/setup` 填 key，
-`/theme` 切深色 / 浅色，`/diff` 看当前改动，`/regenerate` 重新生成上一条回答，
-`/context` 看用量明细。
-窄终端（<80 列）自动收起侧栏。不是 TTY（管道、重定向）时自动回落到
-命令行；`jarvis` 命令本身永远是命令行入口。
+```powershell
+python run_tests.py          # 全量测试：25 个文件，208 项，离线跑
+```
 
-## 桌面版
+注意：`build/` 与 `dist/` 是 PyInstaller 产物，不进 git（见 `.gitignore`）；exe 在本地用 `build-exe.ps1` 重新打。
 
-- 左侧聊天区（气泡 + 悬停操作 + 工具卡片 + 思考折叠）、右侧 Tab 页
-  （会话 / 待办 / Diff / 检查点 / 任务）。输入框多行自增高，Enter 发送、
-  Shift+Enter 换行；发送中按钮变“停止”，忙时回车把追问排进队列。
-- 确认改成聊天区内嵌卡片（允许一次 / 总是允许 / 拒绝 / 编辑），不再弹框。
-- 顶栏有模型芯片、权限档位芯片（点一下换档）、“📋 计划”开关；底部状态行
-  有 context 条和真 token / 费用（API 返回的 usage，拿不到显示“—”）。
-- 设置对话框：改模型、权限档位、最大步数、主题（深色 / 浅色），还能填 key
-  （写进项目 `.env`）。没 key 启动时自动弹首次启动向导。
-- 帮助菜单有快捷键总览；窗口尺寸和分隔条位置会记住。
-- Diff 页按文件分组（+N/-M），接受全部 / 拒绝全部；检查点页点一行恢复文件，
-  悬停消息也有“恢复检查点”；“任务”页列后台任务（与 CLI/TUI 的 `/jobs` 对齐）；
-  记忆侧栏可直接记住/删除一条事实；长对话自动折叠（200 个组件封顶）。
-- 线程规矩：`AgentWorker` 在 QThread 里跑循环，工作线程绝不碰界面控件，
-  结果只通过信号传回主线程。计划执行完另起 `VerifyWorker` 跑验收，
-  报告回来挂成卡片。
-
-## 网页版
-
-- 和桌面版是同一个核心，只是壳不同：浏览器 `fetch` 发 `POST /api/chat`，
-  再用 SSE 把回答一个字一个字接回来，工具调用显示成可折叠卡片
-  （状态 + 耗时 + 输出预览）。
-- 状态在浏览器那边：多会话、历史和长期事实存在 localStorage，每次请求
-  一起发过来，服务器跑完一轮，把更新过的历史和事实放在最后的 `done`
-  事件里还回去（`done` 里还有本次用量和耗时）。这样服务器两次请求之间
-  不留状态，才能放到 Vercel 这种无状态的 serverless 上。
-- API key 是各用各的（BYOK）：页面上方有个 key 输入框，访客填自己的
-  DeepSeek key，存在自己浏览器的 localStorage 里，每次请求一起发过来；
-  服务器只拿它调这一次 DeepSeek，不存、不缓存、不记日志。请求没带 key
-  时，服务器才用环境变量里的 `DEEPSEEK_API_KEY` 兜底（本地开发就靠这个）；
-  两个都没有就报 400，提示填 key。
-- 请求日志：每次调 `/api/chat` 记一行 JSON 日志，只有时间、耗时（毫秒）、
-  成功失败、失败原因、key 来源（`byok` / `env` / `none`）。不记消息内容、
-  历史、事实，更不记 key。
-- 网页版默认最多 6 步（`WEB_MAX_STEPS`）：Vercel 免费版函数最长跑 60 秒，
-  步数太多容易超时。计划执行完也会发 `verify` 事件（验收报告）；会话可
-  分叉（⑂ 分叉按钮，复制当前会话继续聊）；Diff 抽屉只读，拒绝改动请去
-  桌面端/TUI（网页版没有检查点可回滚）。
-
-### 部署到 Vercel
-
-1. 把仓库推到 GitHub，Vercel 里 New Project → Import 这个仓库。
-2. 环境变量：**不要**在 Vercel 上设 `DEEPSEEK_API_KEY`——设了它，不填 key
-   的访客就会用你的 key。每个访客在页面上填自己的 key。
-   `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` 不填就用默认值。
-3. Deploy。部署完打开给你的域名就能用。
-   线上地址：https://jarvis-two-rho-72.vercel.app/
-   注意：`build/` 与 `dist/` 是 PyInstaller 产物，不进 git 也不进 Vercel
-   部署（见 `.gitignore` 与 `.vercelignore`）；exe 在本地用 `build-exe.ps1`
-   重新打。2026-11-22 它们一度被提交进仓库，导致函数 bundle 354.82 MB、
-   超 225 MB 上限，网页版部署失败。
-4. 限制要知道：免费版函数最长 60 秒（一轮对话如果调很多次工具可能超时）；
-   `memory.json` 在 Vercel 上写不进磁盘，长期记忆靠浏览器 localStorage
-   带着走；key 是访客自己的，但请求要经过你的服务器转发——服务器不存 key，
-   不过理论上服务器能看到它，这是 BYOK 模式的固有前提，真要完全不经过你，
-   就得在浏览器里直调 DeepSeek（那是下一步的改法）。
-
-## 主题、快捷键与错误恢复
-
-- **主题**：深色 / 浅色两套，颜色只在 `jarvis/ui/theme.json` /
-  `light.json` 里改一处。GUI 在设置里切，TUI 用 `/theme`，网页版点顶栏
-  的 🌙/☀️，选择记在 `~/.jarvis/ui.json` / 浏览器里。
-- **快捷键总览**：四个界面同一张表——CLI 里输 `?`，TUI 里按 `?`，
-  GUI 在帮助菜单里，网页版点工具栏的“⌨ 快捷键”。
-- **首次启动**：没 key 时 GUI 自动弹设置向导填 key（只写本机 `.env`），
-  TUI 跑 `/setup`；CLI 会直接告诉你去 `.env` 填 key。
-- **出错了**：四个界面都在原地出错误卡片，附一句话恢复提示（429 限流 /
-  key 无效 / 网络不通 / 上下文超长）。重试只给一次；重试一次还失败，
-  改给“复制问题，开新会话”（TUI 没有剪贴板，改成开新会话、问题填回
-  输入框）。
-
-## 用量与费用
-
-- 每轮结束 CLI 会打一行用量；`jarvis --usage` 看最近 7 天。
-- 用量数字是真值：流式调用传 `stream_options={"include_usage": True}`，
-  取最后一个 chunk 的 API usage；拿不到的调用记“未知”、界面显示“—”，
-  绝不拿估算顶替。费用按 DeepSeek 闪电版峰值价算。
-- 日预算（`daily_budget_usd`，0 = 不提醒）：当天花到 80% / 超限时提醒。
-- `~/.jarvis/usage.jsonl` 是原始记录；`jarvis --update` 只检查新版不安装。
-
-## 文件说明
-
-| 文件 | 作用 |
-| --- | --- |
-| `jarvis/core/agent.py` | agent loop 本体：发消息 → 模型要么回答、要么要求调工具 → 执行工具 → 把结果喂回去 → 循环 |
-| `jarvis/tools/tools.py` | 基础工具：时间、计算器、读/写/查文件、取网页、Git、搜索 |
-| `jarvis/tools/shell_tools.py` / `jarvis/safety/policy.py` / `jarvis/safety/permissions.py` / `jarvis/safety/audit.py` / `jarvis/safety/diffutil.py` | Shell、危险命令黑名单、权限三档、审计日志、写前 diff |
-| `jarvis/memory/memory.py` | 记忆层：短期记忆（整轮裁剪）与长期记忆（`memory.json` 事实库 + 检索 + 记忆工具） |
-| `jarvis/core/config.py` / `jarvis/core/model.py` / `jarvis/core/usage.py` / `jarvis/core/jlog.py` | 配置、模型调用（重试）、用量与费用、结构化日志 |
-| `jarvis/memory/session_store.py` / `jarvis/memory/compaction.py` | 会话持久化、上下文压缩 |
-| `jarvis/memory/todo.py` / `jarvis/memory/checkpoint.py` / `jarvis/memory/planner.py` | 待办清单、文件检查点、规划模式 |
-| `jarvis/runtime/subagent.py` / `jarvis/runtime/jobs.py` | 子代理委派、后台任务 |
-| `jarvis/extensions/skills.py` / `skills/` / `jarvis/extensions/mcp_client.py` / `jarvis/extensions/hooks.py` / `jarvis/extensions/plugins.py` | 技能、MCP 客户端、Hooks、插件加载 |
-| `jarvis/ui/md.py` | 极简 Markdown → ANSI / HTML（CLI 与 GUI 共用） |
-| `jarvis/ui/trajectory.py` / `jarvis/ui/update.py` | 轨迹回放、自更新检查 |
-| `jarvis/ui/chat.py` | 命令行入口：REPL + 一次问答 + 会话/用量/轨迹/更新命令 |
-| `jarvis/ui/viewstate.py` | 四界面共用层（U7）：`ViewState` 状态机（会话/计划/待办/Diff/检查点/用量同一份状态）+ 统一文案（帮助、空态、模式标签、Diff 接受/拒绝）+ 检查点点行换算 |
-| `jarvis/ui/worker.py` | GUI 的后台线程：`AgentWorker` 在 QThread 里跑循环，结果用信号发回主线程，写操作确认也走信号；`VerifyWorker` 跑计划验收 |
-| `jarvis/ui/gui.py` | 图形界面：聊天区、会话列表、记忆侧栏、设置、检查点、轨迹、任务 |
-| `jarvis/ui/server.py` | 网页版后端：FastAPI，`GET /` 返回聊天页，`POST /api/chat` 用 SSE 流式返回 |
-| `api/index.py` / `vercel.json` | Vercel 入口与配置 |
-| `jarvis.spec` / `build-exe.ps1` / `.github/workflows/build.yml` | PyInstaller 打包（Windows 上跑）、CI 打 tag 自动出 exe |
-| `CHANGELOG.md` / `docs/usage-manual.md` / `docs/ARCHITECTURE.md` | 更新日志、日常使用手册、架构说明 |
-| `run_tests.py` / `tests/test_*.py` | 全量测试入口与 24 个测试文件（192 项，离线跑） |
-| `.env.example` / `requirements.txt` / `requirements-gui.txt` / `pyproject.toml` | 配置模板、依赖、打包配置 |
-
-## 常见问题
-
-- **没 key**：`python -m jarvis.ui.chat` 会提示去 `.env` 填 `DEEPSEEK_API_KEY`；
-  网页版在页面上方填 key，只存浏览器。
-- **写文件被拦住了**：先看是不是危险命令，再看权限档位（`readonly` 直接拒绝，
-  `edit` 要点确认）；`before_write` 钩子失败也会拦，输出里会写原因。
-- **上下文太长**：超过上限 70% 会自动把旧对话压缩成摘要，工具链不断。
-- **检查点**：写文件前自动备份在 `~/.jarvis/checkpoints/<会话id>/`，
-  `/rewind` 或 GUI“恢复检查点”按钮恢复，只恢复最近 50 个。
-- **更新**：`jarvis --update` 只检查不安装；有新版去 GitHub releases 下。
-
-## 下一步
-
-- 语音输入/输出（本轮没做）
-- 浏览器里直调 DeepSeek（BYOK 不再经过服务器转发）
-- 向量检索替代 bigram 关键词检索
-- 详见学习指南：《Personal Agent 学习指南：从概念到第一个 Agent Loop》
+代码结构与分层规则见 `docs/ARCHITECTURE.md`；日常使用手册见 `docs/usage-manual.md`；学习指南见《Personal Agent 学习指南：从概念到第一个 Agent Loop》。
