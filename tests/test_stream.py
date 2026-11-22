@@ -28,12 +28,14 @@ class FakeStreamClient:
         return item
 
 
-def _chunk(content=None, tool_calls=None):
+def _chunk(content=None, tool_calls=None, reasoning=None, usage=None):
     return SimpleNamespace(
         choices=[SimpleNamespace(
-            delta=SimpleNamespace(content=content, tool_calls=tool_calls),
+            delta=SimpleNamespace(content=content, tool_calls=tool_calls,
+                                  reasoning_content=reasoning),
             finish_reason=None,
-        )]
+        )],
+        usage=usage,
     )
 
 
@@ -61,9 +63,9 @@ def test_stream_text_answer():
     answer = run_agent(client, "你好", stream=True, verbose=False,
                        on_event=lambda kind, payload: events.append((kind, payload)))
     assert answer == "你好，我是 Jarvis。", answer
-    tokens = [p for k, p in events if k == "token"]
+    tokens = [p["text"] for k, p in events if k == "text_delta"]
     assert tokens == ["你好", "，我是 Jarvis。"], tokens
-    print("[OK] 流式文本：碎片按顺序拼成完整回答，token 事件依次发出")
+    print("[OK] 流式文本：碎片按顺序拼成完整回答，text_delta 事件依次发出")
 
 
 def test_stream_tool_call_split_args():
@@ -79,11 +81,28 @@ def test_stream_tool_call_split_args():
     answer = run_agent(client, "12*(3+4) 等于多少？", stream=True, verbose=False,
                        on_event=lambda kind, payload: events.append((kind, payload)))
     assert "84" in answer, answer
-    tool_calls = [p for k, p in events if k == "tool_call"]
+    tool_calls = [p for k, p in events if k == "tool_start"]
     assert len(tool_calls) == 1, tool_calls
     assert tool_calls[0]["name"] == "calculator", tool_calls
     assert tool_calls[0]["args"] == {"expression": "12 * (3 + 4)"}, tool_calls
+    tool_ends = [p for k, p in events if k == "tool_end"]
+    assert len(tool_ends) == 1, tool_ends
+    assert tool_ends[0]["status"] == "ok" and tool_ends[0]["duration_ms"] >= 0
     print("[OK] 流式工具调用：拆成两段的参数拼起来了，calculator 正常执行")
+
+
+def test_stream_thinking_delta():
+    events = []
+    client = FakeStreamClient([
+        [_chunk(reasoning="先想想…"), _chunk(reasoning="再想想…"),
+         _chunk("答案。")],
+    ])
+    answer = run_agent(client, "想想", stream=True, verbose=False,
+                       on_event=lambda kind, payload: events.append((kind, payload)))
+    assert answer == "答案。", answer
+    thinking = [p["text"] for k, p in events if k == "thinking_delta"]
+    assert thinking == ["先想想…", "再想想…"], thinking
+    print("[OK] 流式思考：reasoning_content 按段发出 thinking_delta")
 
 
 def test_stream_history_is_dict():
@@ -108,5 +127,6 @@ def test_stream_history_is_dict():
 if __name__ == "__main__":
     test_stream_text_answer()
     test_stream_tool_call_split_args()
+    test_stream_thinking_delta()
     test_stream_history_is_dict()
     print("全部通过。")

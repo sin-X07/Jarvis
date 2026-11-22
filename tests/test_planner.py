@@ -29,7 +29,8 @@ def test_todo_list():
     assert "已完成" in todo.mark_done(0)
     assert len(todo.pending()) == 1 and todo.pending()[0]["title"] == "改代码"
     assert "没有第 9 项" in todo.mark_done(8)
-    assert "[x] 1. 读文件" in todo.render(), todo.render()
+    assert "☑ 1. 读文件" in todo.render(), todo.render()
+    assert "◐ 2. 改代码" in todo.render(), todo.render()
     path = os.path.join(tempfile.mkdtemp(), "todos.json")
     todo.save(path)
     loaded = TodoList.load(path)
@@ -113,7 +114,8 @@ def test_parse_plan():
     assert plan.steps[0]["acceptance"] == "说出加工具的三步", plan.steps
     assert plan.risks == ["工具名冲突"], plan.risks
     todos = plan.to_todos()
-    assert len(todos.items) == 3 and todos.render().count("[ ]") == 3
+    assert len(todos.items) == 3 and todos.render().count("☐") == 2 \
+        and todos.render().count("◐") == 1, todos.render()
     print("[OK] 规划：固定格式解析出目标/步骤/验收/风险")
 
 
@@ -158,6 +160,46 @@ def test_verify_plan():
     print("[OK] 规划：verify_plan 返回逐项检查报告")
 
 
+def test_todo_event_and_on_change():
+    """U4-2：to_event 三态（pending/active/done，同时只有一个进行中），
+    每次变动调 on_change。"""
+    from jarvis.memory.todo import attach_todo_tools
+    seen = []
+    todo = TodoList(on_change=lambda: seen.append(todo.to_event()))
+    todo.add("第一步")
+    todo.add("第二步")
+    todo.add("第三步")
+    assert [e["status"] for e in todo.to_event()] == [
+        "active", "pending", "pending"], todo.to_event()
+    assert len(seen) == 3, seen  # 每次 add 都通知一次
+    todo.mark_done(0)
+    assert [e["status"] for e in todo.to_event()] == [
+        "done", "active", "pending"], todo.to_event()
+    todo.mark_done_by_title("第二步")
+    assert [e["status"] for e in todo.to_event()] == [
+        "done", "done", "active"], todo.to_event()
+    todo.mark_done(2)
+    assert [e["status"] for e in todo.to_event()] == [
+        "done", "done", "done"], todo.to_event()
+    assert todo.active_index() is None
+    # 换清单后 update_todo 指向新清单（旧闭包不再勾旧表）
+    tools2, funcs2 = [], {}
+    old = TodoList()
+    old.add("旧第一步")
+    old.add("旧第二步")
+    attach_todo_tools(old, tools2, funcs2)
+    assert tools2[0]["function"]["name"] == "update_todo"
+    todo2 = TodoList()
+    todo2.add("新第一步")
+    todo2.add("新第二步")
+    attach_todo_tools(todo2, tools2, funcs2)
+    assert len(tools2) == 1, tools2  # 旧的 update_todo 没留两份
+    assert "已完成" in funcs2["update_todo"](title="新第一步")
+    assert len(todo2.pending()) == 1
+    assert len(old.pending()) == 2, "新调用不该动旧表"
+    print("[OK] U4-2：待办三态 + on_change + 换清单重挂 update_todo")
+
+
 if __name__ == "__main__":
     test_todo_list()
     test_todo_tools()
@@ -167,4 +209,5 @@ if __name__ == "__main__":
     test_make_plan_with_fake_client()
     test_readonly_loop()
     test_verify_plan()
+    test_todo_event_and_on_change()
     print("全部通过。")

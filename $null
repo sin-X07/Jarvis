@@ -1,0 +1,16 @@
+warning: in the working copy of 'jarvis/core/agent.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'jarvis/core/config.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'jarvis/core/model.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'jarvis/core/usage.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'jarvis/memory/checkpoint.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'jarvis/memory/compaction.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'jarvis/memory/planner.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'jarvis/memory/todo.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'jarvis/safety/diffutil.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'jarvis/tools/tools.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'jarvis/ui/chat.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'jarvis/ui/gui.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'jarvis/ui/md.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'jarvis/ui/server.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'jarvis/ui/trajectory.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'jarvis/ui/worker.py', LF will be replaced by CRLF the next time Git touches it

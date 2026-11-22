@@ -23,6 +23,13 @@ def main() -> int:
         print("没有找到测试。")
         return 1
     env = dict(os.environ)
+    # Windows 控制台默认 GBK（cp936），测试打印的 ✓ / ☐ / → 等字符会
+    # 报 UnicodeEncodeError（2026-11-22 真机：test_gui.py 在这一项上
+    # 崩）。强制子进程用 UTF-8 输出，与沙箱行为一致。
+    env["PYTHONUTF8"] = "1"
+    # 不缓冲子进程输出：某个测试崩掉（段错误）时，缓冲里的 [OK] 行会
+    # 跟着进程一起丢，查不到崩在哪一项。强制不缓冲，崩点可见。
+    env["PYTHONUNBUFFERED"] = "1"
     # 子进程要能 import jarvis.*（项目根目录）和 test_loop 这类
     # 测试间互相 import 的模块（tests/ 目录）。
     pythonpath = os.pathsep.join(

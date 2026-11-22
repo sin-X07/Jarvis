@@ -1,7 +1,7 @@
 ﻿# 在 Sun 的 Windows 电脑上打包 Jarvis（P8-3）。
 # 用法：在项目目录下右键“使用 PowerShell 运行”，或：
 #     powershell -ExecutionPolicy Bypass -File .\build-exe.ps1
-# 产出：dist\jarvis.exe（命令行版）、dist\jarvis-gui.exe（桌面版）。
+# 产出：dist\jarvis.exe（命令行版）、dist\jarvis-gui.exe（桌面版）、dist\jarvis-tui.exe（全屏终端版）。
 # 注意：不要在 Linux 上跑这个脚本——PyInstaller 打出来的是当前平台的
 # 二进制，Linux 上打不出 Windows exe。
 
@@ -14,6 +14,7 @@ if ($LASTEXITCODE -ne 0) { throw "没找到 python，先装 Python 3.11+ 并勾�
 
 Write-Host "2/3 安装依赖..."
 python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 python -m pip install -r requirements-gui.txt
 python -m pip install pyinstaller
 

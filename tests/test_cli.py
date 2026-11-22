@@ -127,6 +127,42 @@ def test_commands_misc():
     print("[OK] CLI：/help /model /permission /status /todo /jobs /usage /quit 都正常")
 
 
+def test_cli_diff_and_hook():
+    """U5-2/U5-3：/diff 按文件分组（含未跟踪文件）；建会话即注册写前
+    钩子，写文件成功且自动备份（之前只建库不注册，备份从没跑过）。"""
+    from test_diffutil import GIT_DIFF
+    from jarvis.memory.checkpoint import current_store, set_current_store
+    from jarvis.tools import tools
+
+    tmp = tempfile.mkdtemp()
+    session = _session(tmp)
+    old_diff = chat.working_tree_diff
+    old_hooks = list(tools._BEFORE_WRITE_HOOKS)
+    old_store = current_store()
+    old_dir = tools.PROJECT_DIR
+    try:
+        chat.working_tree_diff = lambda: GIT_DIFF
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            assert handle_command(session, "/diff") is True
+        out = buf.getvalue()
+        assert "=== a.py（+1 行 / -1 行）===" in out, out
+        assert "=== b.py（+2 行 / -0 行）===" in out, out
+        tools.PROJECT_DIR = tmp
+        session.ensure_session("写个文件")
+        assert tools.write_text_file("a.txt", "hello").startswith("已写入")
+        # 新文件没有旧内容可备份；第二次写才产生检查点
+        assert len(session.checkpoints.list_checkpoints()) == 0
+        assert tools.write_text_file("a.txt", "hello2").startswith("已写入")
+        assert len(session.checkpoints.list_checkpoints()) == 1
+    finally:
+        chat.working_tree_diff = old_diff
+        tools._BEFORE_WRITE_HOOKS[:] = old_hooks
+        set_current_store(old_store)
+        tools.PROJECT_DIR = old_dir
+    print("[OK] CLI：/diff 按文件分组；建会话即注册写前钩子，写文件自动备份")
+
+
 def test_resume_session():
     tmp = tempfile.mkdtemp()
     session = _session(tmp)
@@ -151,6 +187,56 @@ def test_build_system_prompt_includes_skills():
     print("[OK] CLI：system prompt 里拼进了技能列表")
 
 
+def test_cli_question_mark_shows_shortcuts():
+    """U6-2：REPL 里裸 ? 显示快捷键总览，不发给模型。"""
+    import builtins
+    from unittest.mock import patch
+    from jarvis.ui.chat import repl
+
+    with tempfile.TemporaryDirectory() as tmp:
+        session = _session(tmp)
+        calls = []
+        session.ask = lambda text: calls.append(text) or "不该被调到"
+        buf = io.StringIO()
+        with patch.object(builtins, "input", side_effect=["?", "/quit"]), \
+                redirect_stdout(buf):
+            repl(session)
+        out = buf.getvalue()
+    assert "快捷键" in out, out
+    assert "/plan" in out and "先出计划卡片" in out, out
+    assert calls == [], "裸 ? 不该发给模型"
+    print("[OK] CLI：裸 ? 显示快捷键总览，不发给模型")
+
+
+def test_cli_repl_error_does_not_crash():
+    """U6-4：REPL 里一轮报错不打死循环，带恢复提示，再发一次能继续。"""
+    import builtins
+    from unittest.mock import patch
+    from jarvis.ui.chat import repl
+
+    with tempfile.TemporaryDirectory() as tmp:
+        session = _session(tmp)
+        state = {"n": 0}
+
+        def _ask(text):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise RuntimeError("RateLimit 429 too many requests")
+            return "好的"
+
+        session.ask = _ask
+        buf = io.StringIO()
+        with patch.object(builtins, "input",
+                          side_effect=["你好", "你好", "/quit"]), \
+                redirect_stdout(buf):
+            repl(session)
+        out = buf.getvalue()
+    assert "出错了" in out and "请求太频繁" in out, out
+    assert "直接再发一次可重试" in out, out
+    assert "好的" in out, out
+    print("[OK] CLI：REPL 报错不崩，带恢复提示，再发一次能继续")
+
+
 if __name__ == "__main__":
     test_md_html()
     test_md_ansi()
@@ -158,6 +244,9 @@ if __name__ == "__main__":
     test_cli_sessions_empty()
     test_commands_memory()
     test_commands_misc()
+    test_cli_diff_and_hook()
     test_resume_session()
     test_build_system_prompt_includes_skills()
+    test_cli_question_mark_shows_shortcuts()
+    test_cli_repl_error_does_not_crash()
     print("全部通过。")

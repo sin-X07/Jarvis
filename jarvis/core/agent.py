@@ -24,9 +24,10 @@ Model name note (verified 2026-11-21):
 
 import json
 import sys
+import time
 
 from jarvis.core.config import load_config
-from jarvis.core.model import BASE_URL, MODEL, build_client, call_model
+from jarvis.core.model import BASE_URL, MODEL, _is_retryable, build_client, call_model
 from jarvis.core.model import _accumulate_stream, _message_to_dict  # noqa: F401 - 兼容旧导入
 
 __all__ = ["SYSTEM_PROMPT", "MODEL", "BASE_URL", "MAX_STEPS",
@@ -43,13 +44,31 @@ SYSTEM_PROMPT = (
 
 
 def _call_model(client, model, messages, tools, stream, on_token,
-                usage=None):
-    """调一次模型，返回 dict 形式的消息；用量顺手记进 tracker（如果给了）。"""
+                on_thinking=None, usage=None):
+    """调一次模型，返回 (消息 dict, 用量 dict)；用量顺手记进 tracker（如果给了）。
+
+    用量 dict 只含 API 返回的真数，拿不到时 unknown=True（见 model.py）。
+    """
     msg, usage_dict = call_model(
-        client, model, messages, tools, stream=stream, on_token=on_token)
+        client, model, messages, tools, stream=stream, on_token=on_token,
+        on_thinking=on_thinking)
     if usage is not None:
         usage.record(usage_dict, model=model)
-    return msg
+    return msg, usage_dict
+
+
+def _status_payload(usage, model: str) -> dict:
+    """用量 tracker -> status 事件 payload（token 数全部是真数）。"""
+    return {
+        "model": model,
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+        "total_tokens": usage.total_tokens,
+        "context_pct": usage.context_pct(),
+        "cost_cny": round(usage.cost_cny, 4),
+        "calls": usage.calls,
+        "unknown_calls": usage.unknown_calls,
+    }
 
 
 def run_agent(client, user_message: str, model: str = MODEL,
@@ -70,10 +89,16 @@ def run_agent(client, user_message: str, model: str = MODEL,
         下次调用还接着用。不传则和原来一样：每次都是全新的一问一答。
     extra_tools / extra_funcs: 追加的工具（比如记忆工具），和 tools.py
         里原有的合并后一起交给模型。
-    on_event: 可选回调 on_event(kind, payload)，循环里有进展就调它：
-        ("token", text) 流式吐出的每段文字；("tool_call", {...}) 调工具前；
-        ("tool_result", {...}) 工具返回后。不传时退化成 verbose 打印。
-    stream: True 时用流式调用，回答边生成边通过 ("token", ...) 事件发出。
+    on_event: 可选回调 on_event(kind, payload)，循环里有进展就调它。
+        事件种类见 jarvis/ui/events.py 的 EVENT_KINDS（U0-1 的契约）：
+        ("text_delta", {"text"}) 流式吐出的每段文字；
+        ("thinking_delta", {"text"}) 思考流；
+        ("tool_start", {...}) 调工具前；("tool_end", {...}) 工具返回后
+        （带 status / duration_ms）；("status", {...}) 每次模型调用后
+        的用量（全是真数）；("turn_end", {...}) 本轮结束；
+        ("error", {...}) 循环抛错时。不传时退化成 verbose 打印。
+    stream: True 时用流式调用，回答边生成边通过
+    ("text_delta", {"text": ...}) 事件发出。
         历史里存的消息统一是 dict，两种模式都一样。
     usage: UsageTracker（可选），每次模型调用的 token/费用记进去；
         传了它，调用方才能在结束时打出费用小结。
@@ -128,6 +153,11 @@ def run_agent(client, user_message: str, model: str = MODEL,
                          messages, tools, funcs, on_event, stream,
                          usage, max_budget_usd, session_store, session_id,
                          parallel, gate, record, allowed_names)
+    except Exception as exc:  # noqa: BLE001 - 先发 error 事件，再原样抛给调用方
+        if on_event is not None:
+            on_event("error", {"message": str(exc),
+                               "retryable": _is_retryable(exc)})
+        raise
     finally:
         set_current_gate(_prev_gate)
 
@@ -142,11 +172,11 @@ def _run_loop(client, user_message, model, max_steps, verbose,
         if on_event is not None:
             on_event(kind, payload)
         elif verbose:
-            if kind == "tool_call":
+            if kind == "tool_start":
                 print(f"[step {payload['step']}] 调用工具 {payload['name']}({payload['args']})")
-            elif kind == "tool_result":
+            elif kind == "tool_end":
                 print(f"[step {payload['step']}] 工具返回: {str(payload['result'])[:200]}")
-            elif kind == "direct":
+            elif kind == "turn_end":
                 print(f"[step {payload['step']}] 模型直接回答，循环结束")
 
     for step in range(1, max_steps + 1):
@@ -156,11 +186,18 @@ def _run_loop(client, user_message, model, max_steps, verbose,
                           f"（{usage.summary()}），先停下来。")
                 record("assistant", {"content": answer})
                 messages.append({"role": "assistant", "content": answer})
+                report("turn_end", {"step": step, "answer": answer})
                 return answer
-        msg = _call_model(client, model, messages, tools, stream,
-                          lambda text: report("token", text), usage=usage)
+        msg, _usage_dict = _call_model(
+            client, model, messages, tools, stream,
+            lambda text: report("text_delta", {"text": text}),
+            on_thinking=lambda text: report("thinking_delta", {"text": text}),
+            usage=usage)
+        if usage is not None:
+            report("status", _status_payload(usage, model))
         if not msg.get("tool_calls"):
-            report("direct", {"step": step})
+            report("turn_end", {"step": step,
+                                "answer": msg.get("content") or ""})
             # 多轮对话时，模型的回答也要留进历史，否则下次它就看不到自己说过什么
             messages.append(msg)
             record("assistant", {"content": msg.get("content")})
@@ -181,6 +218,7 @@ def _run_loop(client, user_message, model, max_steps, verbose,
             })
 
     answer = "达到最大步数，任务未完成。"
+    report("turn_end", {"step": max_steps, "answer": answer})
     record("assistant", {"content": answer})
     messages.append({"role": "assistant", "content": answer})
     return answer
@@ -207,8 +245,9 @@ def _run_tool_calls(calls, funcs, step, report, gate, parallel, record,
         if allowed_names is not None and name not in allowed_names:
             result = (f"当前是规划模式（只读），不能执行 {name}。"
                       "先完成调研和计划，确认后再执行。")
-            report("tool_call", {"step": step, "name": name, "args": {}})
-            report("tool_result", {"step": step, "name": name, "result": result})
+            report("tool_start", {"step": step, "name": name, "args": {}})
+            report("tool_end", {"step": step, "name": name, "result": result,
+                                "status": "error", "duration_ms": 0})
             record("tool_result", {"name": name, "result": result,
                                    "tool_call_id": call_id})
             results[i] = result
@@ -218,8 +257,9 @@ def _run_tool_calls(calls, funcs, step, report, gate, parallel, record,
         except (json.JSONDecodeError, TypeError):
             # 参数不是合法 JSON：别崩，把错误喂回模型让它自己纠正。
             result = f"工具参数解析失败：{name} 的 arguments 不是合法 JSON，请重试。"
-            report("tool_call", {"step": step, "name": name, "args": {}})
-            report("tool_result", {"step": step, "name": name, "result": result})
+            report("tool_start", {"step": step, "name": name, "args": {}})
+            report("tool_end", {"step": step, "name": name, "result": result,
+                                "status": "error", "duration_ms": 0})
             record("tool_result", {"name": name, "result": result,
                                    "tool_call_id": call_id})
             results[i] = result
@@ -227,22 +267,26 @@ def _run_tool_calls(calls, funcs, step, report, gate, parallel, record,
         func = funcs.get(name)
         if func is None:
             result = f"未知工具: {name}"
-            report("tool_call", {"step": step, "name": name, "args": args})
-            report("tool_result", {"step": step, "name": name, "result": result})
+            report("tool_start", {"step": step, "name": name, "args": args})
+            report("tool_end", {"step": step, "name": name, "result": result,
+                                "status": "error", "duration_ms": 0})
             record("tool_result", {"name": name, "result": result,
                                    "tool_call_id": call_id})
             results[i] = result
             continue
-        report("tool_call", {"step": step, "name": name, "args": args})
+        report("tool_start", {"step": step, "name": name, "args": args})
         record("tool_call", {"name": name, "args": args, "tool_call_id": call_id})
         prepared.append((i, call, name, func, args))
 
     def _execute(item):
+        """跑一个工具，返回 (结果文本, 是否成功, 耗时毫秒)。"""
         _i, _call, name, func, args = item
+        started = time.monotonic()
         try:
-            return func(**args)
+            return func(**args), True, (time.monotonic() - started) * 1000
         except Exception as exc:  # noqa: BLE001 - 工具炸了也要喂回模型，不崩循环
-            return f"工具 {name} 执行出错：{type(exc).__name__}: {exc}"
+            return (f"工具 {name} 执行出错：{type(exc).__name__}: {exc}",
+                    False, (time.monotonic() - started) * 1000)
 
     can_parallel = (parallel and len(prepared) > 1
                     and all(name in READ_ACTIONS for (_, _, name, _, _) in prepared))
@@ -251,8 +295,10 @@ def _run_tool_calls(calls, funcs, step, report, gate, parallel, record,
             executed = list(pool.map(_execute, prepared))
     else:
         executed = [_execute(item) for item in prepared]
-    for (i, call, name, _func, _args), result in zip(prepared, executed):
-        report("tool_result", {"step": step, "name": name, "result": str(result)})
+    for (i, call, name, _func, _args), (result, ok, duration_ms) in zip(prepared, executed):
+        report("tool_end", {"step": step, "name": name, "result": str(result),
+                            "status": "ok" if ok else "error",
+                            "duration_ms": round(duration_ms)})
         record("tool_result", {"name": name, "result": str(result)[:2000],
                                "tool_call_id": call["id"]})
         results[i] = result

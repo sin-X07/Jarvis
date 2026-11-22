@@ -14,6 +14,9 @@
 
 触发：调用方在每轮循环前算一下 estimate_tokens，超过
 threshold（默认 70% 上下文窗口）就调 maybe_compact。
+注意：estimate_tokens 只是发请求前的内部启发式（够不够触发压缩），
+它的结果绝不进入用量统计、绝不显示在界面上——用量只认 API
+返回的真 usage（见 usage.py）。
 """
 
 from jarvis.core.usage import estimate_tokens

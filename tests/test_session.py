@@ -140,15 +140,18 @@ def test_maybe_compact_threshold():
 def test_usage_tracker_and_cost():
     tracker = UsageTracker()
     tracker.record({"prompt_tokens": 1000, "completion_tokens": 500,
-                    "estimated": False})
-    tracker.record({"prompt_tokens": 2000, "completion_tokens": 1000,
-                    "estimated": True})
-    assert tracker.calls == 2 and tracker.total_tokens == 4500, tracker
-    assert tracker.estimated_calls == 1
-    assert abs(tracker.cost_usd - cost_usd(3000, 1500)) < 1e-9
+                    "unknown": False})
+    tracker.record({"prompt_tokens": None, "completion_tokens": None,
+                    "unknown": True})
+    assert tracker.calls == 2 and tracker.total_tokens == 1500, tracker
+    assert tracker.unknown_calls == 1
+    assert tracker.last_prompt_tokens == 1000
+    assert tracker.context_pct() == 1000 / 1_000_000
+    assert abs(tracker.cost_usd - cost_usd(1000, 500)) < 1e-9
     summary = tracker.summary()
-    assert "4500" in summary and "¥" in summary and "估算" in summary, summary
-    print("[OK] 用量：记数、算费用、小结一句话（含估算标注）")
+    assert "1500" in summary and "¥" in summary and "未返回用量" in summary
+    assert "估算" not in summary, summary
+    print("[OK] 用量：记真数、算费用、未知调用不混入合计、context 条取真数")
 
 
 if __name__ == "__main__":

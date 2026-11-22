@@ -95,15 +95,18 @@ def parse_plan(text: str) -> Plan:
 
 
 def make_plan(client, model: str, task: str, extra_tools=None,
-              extra_funcs=None, max_steps: int = 8) -> Plan:
-    """跑一轮只读循环，让模型调研并输出计划，解析后返回 Plan。"""
+              extra_funcs=None, max_steps: int = 8, on_event=None) -> Plan:
+    """跑一轮只读循环，让模型调研并输出计划，解析后返回 Plan。
+
+    on_event 透传给 run_agent：计划轮里工具被拦等事件也能让界面
+    看到（比如网页版的工具卡片），不传就静默。"""
     from jarvis.core.agent import run_agent
 
     answer = run_agent(
         client, PLAN_INSTRUCTION + "\n任务：" + task,
         model=model, max_steps=max_steps, verbose=False,
         extra_tools=extra_tools, extra_funcs=extra_funcs,
-        read_only=True)
+        read_only=True, on_event=on_event)
     plan = parse_plan(answer)
     if not plan.goal:
         plan.goal = task

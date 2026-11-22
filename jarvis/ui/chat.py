@@ -13,7 +13,7 @@
     python -m jarvis.ui.chat --version
 
 交互命令（以 / 开头）：/help /model /status /resume /fork /sessions
-    /todo /plan /rewind /clear /jobs /usage /remember /memory /forget
+    /todo /plan /diff /rewind /clear /jobs /usage /remember /memory /forget
     /permission /quit
 """
 
@@ -21,11 +21,13 @@ import argparse
 import sys
 
 from jarvis.core.agent import MODEL, SYSTEM_PROMPT, build_client, run_agent
-from jarvis.memory.checkpoint import CheckpointStore, set_current_store
+from jarvis.memory.checkpoint import (
+    CheckpointStore, set_current_store, snapshot_if_active)
 from jarvis.memory.compaction import maybe_compact, summarize_with_model
 from jarvis.core.config import __version__, load_config
 from jarvis.extensions.hooks import load_hooks, run_hooks
 from jarvis.ui.md import to_ansi
+from jarvis.ui.events import friendly_error, summarise_tool_call
 from jarvis.memory.memory import ConversationMemory, FactStore, memory_tools
 from jarvis.safety.permissions import ApprovalGate, cli_confirm
 from jarvis.memory.planner import make_plan, verify_plan
@@ -33,7 +35,9 @@ from jarvis.tools.project import project_context_text
 from jarvis.extensions.skills import skill_tools, skills_prompt_fragment
 from jarvis.memory.session_store import SessionStore
 from jarvis.runtime.subagent import subagent_tools
-from jarvis.memory.todo import TodoList, todo_tools
+from jarvis.memory.todo import TodoList, attach_todo_tools, todos_path
+from jarvis.safety.diffutil import render_diff_grouped
+from jarvis.tools.tools import register_before_write_hook, working_tree_diff
 from jarvis.ui.trajectory import render_trajectory
 from jarvis.ui.update import check_update, format_update
 from jarvis.core.usage import UsageTracker, daily_summary
@@ -48,6 +52,7 @@ HELP = """命令：
   /sessions          列出全部会话
   /todo              看待办清单
   /plan <任务>       规划模式：先出计划，确认后再执行，结束时验验收标准
+  /diff              显示工作区当前改动（按文件分组，含未跟踪文件）
   /rewind [n]        恢复最近 n 个文件检查点（默认 1）
   /clear             清空本轮对话历史（长期记忆不受影响）
   /jobs              列出后台任务
@@ -58,6 +63,17 @@ HELP = """命令：
   /forget <内容>     删一条长期记忆（按内容匹配）
   /permission [档位] 看权限档位 / 切换 readonly|edit|auto
   /quit              退出（exit / quit 也行）
+"""
+
+SHORTCUTS = """快捷键（只列常用的，全部命令看 /help）：
+  ?              显示这份快捷键总览
+  /plan <任务>   先出计划卡片，批准后才执行
+  /diff          显示当前改动（按文件分组）
+  /rewind [n]    恢复最近 n 个文件检查点（默认 1）
+  /resume [id]   恢复一个会话
+  /fork          把当前会话另存一份
+  /clear         清空本轮对话历史（长期记忆不受影响）
+  Ctrl+C         退出
 """
 
 
@@ -98,7 +114,6 @@ class CliSession:
             else SessionStore()
         self.session_id = None
         self.jobs = JobManager()
-        self.todo = TodoList()
         self.gate = ApprovalGate(
             args.permission or config.permission, confirm=cli_confirm)
         self.checkpoints = None
@@ -110,11 +125,27 @@ class CliSession:
         sk_schemas, sk_funcs = skill_tools()
         sub_schemas, sub_funcs = subagent_tools(client, self.model)
         job_schemas, job_funcs = jobs_tools(self.jobs)
-        todo_schemas, todo_funcs = todo_tools(self.todo)
         self.extra_tools = (mem_schemas + sk_schemas + sub_schemas
-                            + job_schemas + todo_schemas)
+                            + job_schemas)
         self.extra_funcs = {**mem_funcs, **sk_funcs, **sub_funcs,
-                            **job_funcs, **todo_funcs}
+                            **job_funcs}
+        self.todo = None
+        self._set_todo(TodoList())
+
+    def _set_todo(self, todo: TodoList) -> None:
+        """换一张清单：挂 on_change（打清单 + 落盘），重挂 update_todo。
+
+        U4-2：清单变动 → 打出整表（CLI 的 todo_set 渲染）并存到
+        会话的 todos 文件；执行时模型每调一次 update_todo 就打一次。
+        """
+        self.todo = todo
+        todo.on_change = self._on_todo_change
+        attach_todo_tools(todo, self.extra_tools, self.extra_funcs)
+
+    def _on_todo_change(self) -> None:
+        print("\n待办：\n" + self.todo.render(), flush=True)
+        if self.session_id:
+            self.todo.save(todos_path(self.sessions.root, self.session_id))
 
     # -- 会话管理 -----------------------------------------------------
     def ensure_session(self, first_message: str) -> None:
@@ -125,6 +156,9 @@ class CliSession:
         self.session_id = self.sessions.create(title=title, model=self.model)
         self.checkpoints = CheckpointStore(self.session_id)
         set_current_store(self.checkpoints)
+        # 写文件前自动备份（U5：之前只建库不注册钩子，备份从没跑过；
+        # TUI 注册了但钩子返回 None 会把写文件拦掉，两个缺口一起补）
+        register_before_write_hook(snapshot_if_active)
 
     def resume(self, session_id: str) -> bool:
         """把一个已存会话恢复成当前会话（消息回填进内存）。"""
@@ -138,6 +172,9 @@ class CliSession:
         self.memory.trim()
         self.checkpoints = CheckpointStore(session_id)
         set_current_store(self.checkpoints)
+        register_before_write_hook(snapshot_if_active)
+        self._set_todo(TodoList.load(
+            todos_path(self.sessions.root, session_id)))
         return True
 
     # -- 一轮对话 -----------------------------------------------------
@@ -160,16 +197,16 @@ class CliSession:
             print("（上下文太长，旧对话已压缩成摘要）")
 
         def _on_event(kind, payload):
-            if kind == "token" and stream:
-                sys.stdout.write(payload)
+            if kind == "text_delta" and stream:
+                sys.stdout.write(payload["text"])
                 sys.stdout.flush()
-            elif kind == "tool_call":
-                args = str(payload["args"])
-                if len(args) > 80:
-                    args = args[:80] + "…"
-                print(f"\n▸ 调用 {payload['name']}({args})", flush=True)
-            elif kind == "tool_result":
-                print(f"✓ {payload['name']} 已返回", flush=True)
+            elif kind == "tool_start":
+                print(f"\n▸ {summarise_tool_call(payload['name'], payload['args'])}",
+                      flush=True)
+            elif kind == "tool_end":
+                mark = "✓" if payload["status"] == "ok" else "✗"
+                print(f"{mark} {payload['name']} 已返回"
+                      f"（{payload['duration_ms']}ms）", flush=True)
 
         answer = run_agent(
             self.client, text, model=self.model, max_steps=self.max_steps,
@@ -282,6 +319,11 @@ def handle_command(session: CliSession, text: str) -> bool:
             print("用法：/plan <任务>，比如 /plan 给项目加一个登录页")
             return True
         run_plan(session, arg)
+    elif cmd == "diff":
+        # U5-3：工作区当前改动，按文件分组，含未跟踪文件
+        print(render_diff_grouped(working_tree_diff()))
+        print("接受改动 = 什么都不用做（改动已在工作区）；"
+              "拒绝改动 = /rewind 回滚经 Jarvis 写入的文件。")
     elif cmd == "rewind":
         if not session.checkpoints:
             print("当前会话还没有检查点。")
@@ -340,27 +382,54 @@ def handle_command(session: CliSession, text: str) -> bool:
 
 
 def run_plan(session: CliSession, task: str) -> None:
-    """规划模式：出计划 → 用户确认 → 执行 → 对照验收标准验一遍。"""
+    """规划模式：出计划 → 用户确认（批准/编辑/拒绝）→ 执行 → 验验收标准。
+
+    U4-1：计划卡片就是下面打出来的这份（CLI 的 plan_proposed 渲染）；
+    批准后清单才挂到会话上（todo_set），执行时每勾一步打一次清单。
+    默认拒绝：直接回车 = 不执行。
+    """
+    def _plan_event(kind, payload):
+        # 计划轮的工具事件也打出来：写工具被拦时用户当场看到
+        if kind == "tool_start":
+            print(f"\n▸ {summarise_tool_call(payload['name'], payload['args'])}",
+                  flush=True)
+        elif kind == "tool_end":
+            mark = "✓" if payload["status"] == "ok" else "✗"
+            print(f"{mark} {payload['name']} 已返回"
+                  f"（{payload['duration_ms']}ms）", flush=True)
+
     print("正在调研并制定计划…")
     plan = make_plan(session.client, session.model, task,
                      extra_tools=session.extra_tools,
                      extra_funcs=session.extra_funcs,
-                     max_steps=session.max_steps)
-    print()
-    print(plan.render())
-    print()
-    choice = input("按这个计划执行吗？[y/N] ").strip().lower()
-    if choice not in ("y", "yes"):
-        print("已取消，计划没有执行。")
-        return
-    session.todo = plan.to_todos()
-    todo_schemas, todo_funcs = todo_tools(session.todo)
-    session.extra_tools = [t for t in session.extra_tools
-                           if t["function"]["name"] != "update_todo"]
-    session.extra_funcs.pop("update_todo", None)
-    session.extra_tools += todo_schemas
-    session.extra_funcs.update(todo_funcs)
-    prompt = (f"按下面的计划执行任务，每完成一步调 update_todo 更新进度。"
+                     max_steps=session.max_steps, on_event=_plan_event)
+    while True:
+        print()
+        print("计划卡片：")
+        print(plan.render())
+        print()
+        choice = input("批准执行？[y 批准 / e 编辑 / n 拒绝] ").strip().lower()
+        if choice in ("y", "yes"):
+            break
+        if choice in ("n", "no", ""):
+            print("已拒绝，计划没有执行。")
+            return
+        if choice in ("e", "edit"):
+            note = input("怎么改（直接说，比如“第 2 步去掉”）：").strip()
+            if not note:
+                continue
+            print("按修改意见重新规划…")
+            plan = make_plan(session.client, session.model,
+                             task + "\n修改意见：" + note,
+                             extra_tools=session.extra_tools,
+                             extra_funcs=session.extra_funcs,
+                             max_steps=session.max_steps,
+                             on_event=_plan_event)
+            continue
+        print("只认 y / e / n。")
+    session._set_todo(plan.to_todos())
+    print("\n待办：\n" + session.todo.render())
+    prompt = (f"按顺序执行下面的计划，每完成一步调 update_todo 更新进度。"
               f"\n\n{plan.render()}\n\n任务：{task}")
     answer = session.ask(prompt)
     print()
@@ -374,7 +443,8 @@ def run_plan(session: CliSession, task: str) -> None:
 def repl(session: CliSession) -> None:
     """交互式 REPL 主循环。"""
     print("Jarvis 已启动（多轮对话 + 长期记忆 + 会话持久化）。")
-    print("输入 /help 看命令，/quit 退出。")
+    print("能记住事情、读写文件、跑命令。")
+    print("输入 /help 看命令，? 看快捷键，/quit 退出。")
     if session.store.all_texts():
         print(f"已载入 {len(session.store.all_texts())} 条长期记忆。")
     while True:
@@ -385,11 +455,22 @@ def repl(session: CliSession) -> None:
             break
         if not text:
             continue
+        if text == "?":
+            # 裸 ? 是快捷键总览，不发给模型（U6-2）
+            print(SHORTCUTS)
+            continue
         if text.startswith("/"):
             if not handle_command(session, text):
                 break
             continue
-        answer = session.ask(text)
+        try:
+            answer = session.ask(text)
+        except Exception as exc:  # noqa: BLE001 - REPL 不能被一次报错打死
+            hint = friendly_error(str(exc))
+            print(f"\n✗ 出错了：{exc}"
+                  + (f"（{hint}）" if hint else ""))
+            print("直接再发一次可重试；重试一次还失败，换个说法或 /clear 开新会话。")
+            continue
         print()
         print(to_ansi(answer, use_color=session.use_color))
         if session.config.daily_budget_usd:

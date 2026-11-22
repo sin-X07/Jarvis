@@ -23,7 +23,7 @@ class FakeClient:
         return self._script.pop(0)
 
 
-def _tool_call(call_id, name, arguments):
+def _tool_call(call_id, name, arguments, usage=None):
     return SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(
             content=None,
@@ -31,15 +31,17 @@ def _tool_call(call_id, name, arguments):
                 id=call_id,
                 function=SimpleNamespace(name=name, arguments=arguments),
             )],
-        ))]
+        ))],
+        usage=usage,
     )
 
 
-def _text_reply(text):
+def _text_reply(text, usage=None):
     return SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(
             content=text, tool_calls=None,
-        ))]
+        ))],
+        usage=usage,
     )
 
 

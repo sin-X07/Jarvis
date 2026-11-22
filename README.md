@@ -2,7 +2,7 @@
 
 一个能跑的个人助手：用 DeepSeek 的 API，通过 agent loop
 （思考 → 调工具 → 看结果 → 再思考）回答问题、改文件、跑命令、
-做规划。三个界面（命令行 / 桌面 GUI / 网页）共用同一个核心。
+做规划。四个界面（命令行 / 全屏终端 TUI / 桌面 GUI / 网页）共用同一个核心。
 
 ## 快速开始
 
@@ -21,15 +21,16 @@ python tests/smoke_test.py
 # 4. 跑起来（在项目根目录下跑）
 python -m jarvis.ui.chat                        # 交互式对话
 python -m jarvis.ui.chat --print "现在几点？"    # 一次问答
+python -m jarvis.ui.tui                         # 全屏终端（非 TTY 时自动回落到命令行）
 python -m jarvis.ui.gui                         # 桌面版
 uvicorn jarvis.ui.server:app --reload           # 网页版，打开 http://127.0.0.1:8000/
 
 # 5. 离线测试（不用 key、不联网）
-python run_tests.py                   # 全量测试，19 个文件 117 项
+python run_tests.py                   # 全量测试，24 个文件 192 项
 ```
 
 Windows 上也可以直接用打包好的 exe：打 tag 后 GitHub Actions 自动出
-`jarvis.exe`（命令行）和 `jarvis-gui.exe`（桌面版），挂在 release 上；
+`jarvis.exe`（命令行）和 `jarvis-gui.exe`（桌面版）、`jarvis-tui.exe`（全屏终端版），挂在 release 上；
 本地打包跑 `.\build-exe.ps1`。
 
 ## 模型名注意
@@ -69,7 +70,7 @@ jarvis --version             打印版本号
 | 档位 | 读文件/读命令 | 写文件/写命令 | 危险命令 |
 | --- | --- | --- | --- |
 | `readonly` | 允许 | 拒绝 | 拒绝 |
-| `edit`（默认） | 允许 | 弹框确认（写文件前先给你看 diff） | 拒绝 |
+| `edit`（默认） | 允许 | 内嵌确认卡片（写文件前先给你看 diff） | 拒绝 |
 | `auto` | 允许 | 直接放行 | 拒绝 |
 
 危险命令（`rm -rf /`、`format`、`del /s`、`reg delete` 等）任何档位都拒绝。
@@ -117,18 +118,38 @@ Shell 先过危险命令黑名单和工作区检查，写操作要确认，输�
 - **插件**：`plugins/` 里放一个 `.py`，定义 `TOOL_SCHEMA` + `TOOL_FUNC`，
   就是一个新工具，不用改核心代码。
 
+## 全屏终端（TUI）
+
+`python -m jarvis.ui.tui`：四层布局（顶栏 / 聊天流 / 输入框 / 状态栏），
+右侧栏是 Tab 页（会话 / 待办 / Diff / 检查点），分隔条可拖。流式回答
+带光标，工具调用是可折叠卡片（Ctrl+O），思考过程可展开。危险操作按
+单键确认：`a` 允许一次 / `A` 总是允许 / `d` 拒绝 / `e` 编辑。`/plan`
+先出计划卡片，`a` 批准执行。`?` 看快捷键总览，`/setup` 填 key，
+`/theme` 切深色 / 浅色，`/diff` 看当前改动，`/context` 看用量明细。
+窄终端（<80 列）自动收起侧栏。不是 TTY（管道、重定向）时自动回落到
+命令行；`jarvis` 命令本身永远是命令行入口。
+
 ## 桌面版
 
-- 左侧聊天区（Markdown 渲染）、右侧会话列表 + 长期记忆 + 用量显示。
-- 设置对话框：改模型、权限档位、最大步数，保存写回 `~/.jarvis/config.json`。
-- “恢复检查点”“轨迹”按钮：恢复文件备份、看当前会话的时间线。
-- 写操作在 edit 档位会弹确认框；线程规矩：`AgentWorker` 在 QThread 里
-  跑循环，工作线程绝不碰界面控件，结果只通过信号传回主线程。
+- 左侧聊天区（气泡 + 悬停操作 + 工具卡片 + 思考折叠）、右侧 Tab 页
+  （会话 / 待办 / Diff / 检查点）。输入框多行自增高，Enter 发送、
+  Shift+Enter 换行；发送中按钮变“停止”，忙时回车把追问排进队列。
+- 确认改成聊天区内嵌卡片（允许一次 / 总是允许 / 拒绝 / 编辑），不再弹框。
+- 顶栏有模型芯片、权限档位芯片（点一下换档）、“📋 计划”开关；底部状态行
+  有 context 条和真 token / 费用（API 返回的 usage，拿不到显示“—”）。
+- 设置对话框：改模型、权限档位、最大步数、主题（深色 / 浅色），还能填 key
+  （写进项目 `.env`）。没 key 启动时自动弹首次启动向导。
+- 帮助菜单有快捷键总览；窗口尺寸和分隔条位置会记住。
+- Diff 页按文件分组（+N/-M），接受全部 / 拒绝全部；检查点页点一行恢复文件，
+  悬停消息也有“恢复检查点”；长对话自动折叠（200 个组件封顶）。
+- 线程规矩：`AgentWorker` 在 QThread 里跑循环，工作线程绝不碰界面控件，
+  结果只通过信号传回主线程。
 
 ## 网页版
 
 - 和桌面版是同一个核心，只是壳不同：浏览器 `fetch` 发 `POST /api/chat`，
-  再用 SSE 把回答一个字一个字接回来，工具调用显示成一行小灰字。
+  再用 SSE 把回答一个字一个字接回来，工具调用显示成可折叠卡片
+  （状态 + 耗时 + 输出预览）。
 - 状态在浏览器那边：多会话、历史和长期事实存在 localStorage，每次请求
   一起发过来，服务器跑完一轮，把更新过的历史和事实放在最后的 `done`
   事件里还回去（`done` 里还有本次用量和耗时）。这样服务器两次请求之间
@@ -157,10 +178,26 @@ Shell 先过危险命令黑名单和工作区检查，写操作要确认，输�
    不过理论上服务器能看到它，这是 BYOK 模式的固有前提，真要完全不经过你，
    就得在浏览器里直调 DeepSeek（那是下一步的改法）。
 
+## 主题、快捷键与错误恢复
+
+- **主题**：深色 / 浅色两套，颜色只在 `jarvis/ui/theme.json` /
+  `light.json` 里改一处。GUI 在设置里切，TUI 用 `/theme`，网页版点顶栏
+  的 🌙/☀️，选择记在 `~/.jarvis/ui.json` / 浏览器里。
+- **快捷键总览**：四个界面同一张表——CLI 里输 `?`，TUI 里按 `?`，
+  GUI 在帮助菜单里，网页版点工具栏的“⌨ 快捷键”。
+- **首次启动**：没 key 时 GUI 自动弹设置向导填 key（只写本机 `.env`），
+  TUI 跑 `/setup`；CLI 会直接告诉你去 `.env` 填 key。
+- **出错了**：三个界面都在原地出错误卡片，附一句话恢复提示（429 限流 /
+  key 无效 / 网络不通 / 上下文超长）。重试只给一次；重试一次还失败，
+  改给“复制问题，开新会话”（TUI 没有剪贴板，改成开新会话、问题填回
+  输入框）。
+
 ## 用量与费用
 
 - 每轮结束 CLI 会打一行用量；`jarvis --usage` 看最近 7 天。
-- 费用是估算值：流式调用的 token 按字符估算，价格按 DeepSeek 闪电版峰值价。
+- 用量数字是真值：流式调用传 `stream_options={"include_usage": True}`，
+  取最后一个 chunk 的 API usage；拿不到的调用记“未知”、界面显示“—”，
+  绝不拿估算顶替。费用按 DeepSeek 闪电版峰值价算。
 - 日预算（`daily_budget_usd`，0 = 不提醒）：当天花到 80% / 超限时提醒。
 - `~/.jarvis/usage.jsonl` 是原始记录；`jarvis --update` 只检查新版不安装。
 
@@ -186,7 +223,7 @@ Shell 先过危险命令黑名单和工作区检查，写操作要确认，输�
 | `api/index.py` / `vercel.json` | Vercel 入口与配置 |
 | `jarvis.spec` / `build-exe.ps1` / `.github/workflows/build.yml` | PyInstaller 打包（Windows 上跑）、CI 打 tag 自动出 exe |
 | `CHANGELOG.md` / `docs/usage-manual.md` / `docs/ARCHITECTURE.md` | 更新日志、日常使用手册、架构说明 |
-| `run_tests.py` / `tests/test_*.py` | 全量测试入口与 19 个测试文件（117 项，离线跑） |
+| `run_tests.py` / `tests/test_*.py` | 全量测试入口与 24 个测试文件（192 项，离线跑） |
 | `.env.example` / `requirements.txt` / `requirements-gui.txt` / `pyproject.toml` | 配置模板、依赖、打包配置 |
 
 ## 常见问题

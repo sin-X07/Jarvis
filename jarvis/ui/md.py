@@ -39,7 +39,9 @@ def to_html(text: str) -> str:
         line = lines[i]
         if line.strip().startswith("```"):
             if in_code:
-                code = _escape("\n".join(code_buf))
+                # 围栏之间的每行原文（含收围栏前的末尾换行），
+                # 复制代码块时要原样拿回；空块为空串。
+                code = _escape("\n".join(code_buf) + "\n") if code_buf else ""
                 lang = f" class=\"language-{code_lang}\"" if code_lang else ""
                 out.append(f"<pre><code{lang}>{code}</code></pre>")
                 code_buf = []

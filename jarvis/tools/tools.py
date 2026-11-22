@@ -37,8 +37,12 @@ _BEFORE_WRITE_HOOKS = []
 
 
 def register_before_write_hook(func) -> None:
-    """注册一个写前钩子（检查点备份、格式化检查都走这里）。"""
-    _BEFORE_WRITE_HOOKS.append(func)
+    """注册一个写前钩子（检查点备份、格式化检查都走这里）。
+
+    同一个函数只注册一次：三个界面各自在建会话时注册，同一进程里
+    开第二个会话不重复备份。"""
+    if func not in _BEFORE_WRITE_HOOKS:
+        _BEFORE_WRITE_HOOKS.append(func)
 
 
 def _run_before_write_hooks(path: str):
@@ -346,7 +350,7 @@ def _run_git(args: list) -> str:
     except (OSError, subprocess.TimeoutExpired) as exc:
         return f"git 执行失败：{exc}"
     output = (proc.stdout or "") + (proc.stderr or "")
-    if "not a git repository" in output or "不是一个 git 仓库" in output:
+    if "not a git repository" in output.lower() or "不是一个 git 仓库" in output:
         return "当前目录不是一个 git 仓库。"
     return output.strip()[:4000] or "(没有输出)"
 
@@ -359,6 +363,57 @@ def git_status() -> str:
 def git_diff() -> str:
     """git diff：未暂存的改动内容（截断到 4000 字符）。"""
     return _run_git(["diff"])
+
+
+def working_tree_diff() -> str:
+    """工作区当前改动（UI 的 Diff 视图用，不是模型工具）。
+
+    已暂存 + 未暂存（git diff HEAD）再加未跟踪文件（逐个算 diff，
+    文本文件、100KB 以内才展开）。不是 git 仓库时返回提示；
+    总长截到 20000 字符。"""
+    import subprocess
+
+    def _git(args):
+        try:
+            proc = subprocess.run(
+                ["git"] + args, cwd=PROJECT_DIR, capture_output=True,
+                text=True, encoding="utf-8", errors="replace", timeout=15)
+        except FileNotFoundError:
+            return "这台机器上没有装 git。"
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return f"git 执行失败：{exc}"
+        return (proc.stdout or "") + (proc.stderr or "")
+
+    out = _git(["diff", "HEAD"])
+    if "not a git repository" in out.lower():
+        return "当前目录不是一个 git 仓库。"
+    if "fatal" in out.lower():
+        # 还没有提交过：HEAD 不存在，退回只看未暂存
+        out = _git(["diff"])
+    parts = [out] if out.strip() else []
+    status = _git(["status", "--porcelain"])
+    for line in status.splitlines():
+        if not line.startswith("?? "):
+            continue
+        rel = line[3:].strip().strip('"')
+        target = os.path.join(PROJECT_DIR, rel)
+        if os.path.isdir(target):
+            parts.append(f"未跟踪目录：{rel}（目录本身不展开）")
+            continue
+        try:
+            if os.path.getsize(target) > 100_000:
+                parts.append(f"未跟踪文件：{rel}（超过 100KB，不展开）")
+                continue
+            with open(target, encoding="utf-8") as f:
+                content = f.read()
+        except (OSError, UnicodeDecodeError):
+            parts.append(f"未跟踪文件：{rel}（读不出来，可能是二进制）")
+            continue
+        parts.append(make_diff("", content, rel))
+    joined = "\n".join(parts)
+    if len(joined) > 20000:
+        joined = joined[:20000] + "\n…（改动太多，只显示前 20000 字符）"
+    return joined or "(没有输出)"
 
 
 def git_log(count: int = 10) -> str:

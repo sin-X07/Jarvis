@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 
 from jarvis.tools import tools
 from jarvis.core.agent import run_agent
@@ -182,8 +183,13 @@ def test_jobs_tools_wiring():
 
 def test_budget_stops_loop():
     tracker = UsageTracker()
+    # 第一次调用带真实 usage（10 万 prompt token ≈ $0.03），
+    # 第二轮开始前费用已超上限，循环停下。没 usage 时费用是未知，
+    # 预算拦不住——这是 U0-5 的约定，不是 bug。
     client = FakeClient([
-        _tool_call("c1", "calculator", '{"expression": "1 + 1"}'),
+        _tool_call("c1", "calculator", '{"expression": "1 + 1"}',
+                   usage=SimpleNamespace(prompt_tokens=100000,
+                                         completion_tokens=10)),
         _text_reply("等于 2。"),
     ])
     answer = run_agent(client, "1+1 等于几？", verbose=False,

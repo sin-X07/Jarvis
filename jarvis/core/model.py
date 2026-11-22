@@ -10,9 +10,11 @@
 以后要换模型（比如再接一个别的厂商），只改这一层：加一个
 `build_xxx_client` 和对应的 `call_model` 分支，循环不用动。
 
-用量说明：非流式调用直接读 API 返回的 usage；流式调用时 API 不一
-定给 usage（取决于服务端是否支持 stream_options），这时按字符数
-估算，并在 UsageTracker 里标成“估算”。费用永远只是估算，见 usage.py。
+用量说明（U0-5 修订：全部用真数）：非流式调用直接读 API 返回的
+usage；流式调用传 `stream_options={"include_usage": True}`，最后
+一个 chunk 自带整次请求的 usage（DeepSeek 官方文档）。拿不到
+usage 时记 unknown，界面显示"—"，绝不按字符估算顶替。
+`_estimate_usage` 已删除。
 """
 
 import os
@@ -56,20 +58,31 @@ def _is_retryable(exc: Exception) -> bool:
     return status in (429, 500, 502, 503, 504)
 
 
-def _accumulate_stream(chunks, on_token) -> dict:
-    """把流式返回的碎片拼成一条完整消息。
+def _accumulate_stream(chunks, on_token, on_thinking=None) -> tuple:
+    """把流式返回的碎片拼成一条完整消息，返回 (消息 dict, 用量 dict|None)。
 
-    文本按顺序拼，每到一段就调 on_token 发出去；工具调用按 index 归位，
-    id/name 只取第一次出现的，arguments 碎片按顺序拼接。
+    文本按顺序拼，每到一段就调 on_token 发出去；思考流
+    （reasoning_content）按顺序拼，每到一段调 on_thinking；
+    工具调用按 index 归位，id/name 只取第一次出现的，arguments
+    碎片按顺序拼接。
+    用量：最后一个带 usage 的 chunk（include_usage=True 时才有）
+    就是整次请求的真 usage；没有任何 chunk 带 usage 时返回 None。
     """
     content_parts = []
+    reasoning_parts = []
     tool_calls = {}
+    usage = None
     for chunk in chunks:
         delta = chunk.choices[0].delta
         text = getattr(delta, "content", None)
         if text:
             content_parts.append(text)
             on_token(text)
+        thinking = getattr(delta, "reasoning_content", None)
+        if thinking:
+            reasoning_parts.append(thinking)
+            if on_thinking is not None:
+                on_thinking(thinking)
         for call in getattr(delta, "tool_calls", None) or []:
             slot = tool_calls.setdefault(
                 call.index, {"id": "", "name": "", "arguments": ""})
@@ -81,6 +94,12 @@ def _accumulate_stream(chunks, on_token) -> dict:
                     slot["name"] = func.name
                 if getattr(func, "arguments", None):
                     slot["arguments"] += func.arguments
+        raw_usage = getattr(chunk, "usage", None)
+        if raw_usage is not None:
+            usage = {
+                "prompt_tokens": getattr(raw_usage, "prompt_tokens", 0) or 0,
+                "completion_tokens": getattr(raw_usage, "completion_tokens", 0) or 0,
+            }
     calls = None
     if tool_calls:
         calls = [{
@@ -91,18 +110,28 @@ def _accumulate_stream(chunks, on_token) -> dict:
                 "arguments": slot["arguments"] or "{}",
             },
         } for _, slot in sorted(tool_calls.items())]
-    return {
+    msg = {
         "role": "assistant",
         "content": "".join(content_parts) or None,
         "tool_calls": calls,
     }
+    if reasoning_parts:
+        # 思考内容要留进历史：DeepSeek 要求有工具调用的多轮对话里，
+        # 后续轮次必须把 reasoning_content 一起发回去。
+        msg["reasoning_content"] = "".join(reasoning_parts)
+    return msg, usage
 
 
 def _message_to_dict(msg) -> dict:
-    """把一次模型回复统一成 dict（历史里只存 dict，两种调用模式通用）。"""
+    """把一次模型回复统一成 dict（历史里只存 dict，两种调用模式通用）。
+
+    reasoning_content 一起留下来：有工具调用的多轮对话里，后续
+    轮次必须把它发回 API；同时界面用它画“思考中” disclosure。
+    """
     if isinstance(msg, dict):
         return msg
     content = getattr(msg, "content", None)
+    reasoning = getattr(msg, "reasoning_content", None)
     tool_calls = None
     raw_calls = getattr(msg, "tool_calls", None)
     if raw_calls:
@@ -130,16 +159,22 @@ def _message_to_dict(msg) -> dict:
                 "type": "function",
                 "function": {"name": name, "arguments": args},
             })
-    return {"role": "assistant", "content": content, "tool_calls": tool_calls}
+    out = {"role": "assistant", "content": content, "tool_calls": tool_calls}
+    if reasoning:
+        out["reasoning_content"] = reasoning
+    return out
 
 
 def call_model(client, model, messages, tools, stream=False, on_token=None,
-               timeout=None, retry_times=None, sleep=time.sleep):
+               on_thinking=None, timeout=None, retry_times=None,
+               sleep=time.sleep):
     """调一次模型，返回 (message_dict, usage_dict)。
 
-    usage_dict: {"prompt_tokens": int, "completion_tokens": int,
-    "estimated": bool}；拿不到真实用量时（流式）按字符估算，
-    estimated=True。重试耗尽后把最后一次异常原样抛给调用方。
+    usage_dict: {"prompt_tokens": int | None,
+    "completion_tokens": int | None, "unknown": bool}——全部是 API
+    返回的真数；拿不到时 unknown=True、两项都是 None，绝不估算。
+    on_thinking: 思考流回调（有 reasoning_content 时调，流式按段调，
+    非流式一次调全文）。重试耗尽后把最后一次异常原样抛给调用方。
     """
     cfg = load_config()
     timeout = cfg.timeout if timeout is None else timeout
@@ -155,22 +190,33 @@ def call_model(client, model, messages, tools, stream=False, on_token=None,
                     tool_choice="auto", timeout=timeout,
                 )
                 msg = _message_to_dict(response.choices[0].message)
+                if msg.get("reasoning_content") and on_thinking is not None:
+                    on_thinking(msg["reasoning_content"])
                 raw = getattr(response, "usage", None)
                 if raw is not None:
                     usage = {
                         "prompt_tokens": getattr(raw, "prompt_tokens", 0) or 0,
                         "completion_tokens": getattr(raw, "completion_tokens", 0) or 0,
-                        "estimated": False,
+                        "unknown": False,
                     }
                 else:
-                    usage = _estimate_usage(messages, msg)
+                    usage = {"prompt_tokens": None,
+                             "completion_tokens": None, "unknown": True}
                 return msg, usage
             chunks = client.chat.completions.create(
                 model=model, messages=messages, tools=tools,
                 tool_choice="auto", stream=True, timeout=timeout,
+                # 让最后一个 chunk 带上整次请求的 usage（官方文档语义）
+                stream_options={"include_usage": True},
             )
-            msg = _accumulate_stream(chunks, on_token)
-            return msg, _estimate_usage(messages, msg)
+            msg, stream_usage = _accumulate_stream(
+                chunks, on_token, on_thinking)
+            if stream_usage is not None:
+                usage = dict(stream_usage, unknown=False)
+            else:
+                usage = {"prompt_tokens": None,
+                         "completion_tokens": None, "unknown": True}
+            return msg, usage
         except Exception as exc:  # noqa: BLE001 - 可重试的才重试，其余原样抛出
             last_exc = exc
             if attempt < retry_times and _is_retryable(exc):
@@ -178,18 +224,3 @@ def call_model(client, model, messages, tools, stream=False, on_token=None,
                 continue
             raise
     raise last_exc  # pragma: no cover - 循环一定会 return 或 raise
-
-
-def _estimate_usage(messages, msg) -> dict:
-    """按字符数估算 token（流式拿不到 usage 时的 fallback）。
-
-    估算规则见 usage.estimate_tokens：中文约 1 字 1 token，
-    英文约 4 字符 1 token。标 estimated=True，费用只是估算。
-    """
-    from jarvis.core.usage import estimate_tokens  # 延迟导入，避免循环引用
-
-    prompt = sum(estimate_tokens(str(m.get("content") or ""))
-                 for m in messages if isinstance(m, dict))
-    completion = estimate_tokens(str(msg.get("content") or ""))
-    return {"prompt_tokens": prompt, "completion_tokens": completion,
-            "estimated": True}

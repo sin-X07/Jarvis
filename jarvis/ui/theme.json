@@ -1,0 +1,42 @@
+{
+  "color": {
+    "accent": "#89b4fa",
+    "bg": "#1e1e2e",
+    "border": "#313244",
+    "codeBg": "#11111b",
+    "danger": "#f38ba8",
+    "diffAdd": "#a6e3a1",
+    "diffDel": "#f38ba8",
+    "info": "#89dceb",
+    "success": "#a6e3a1",
+    "surface": "#181825",
+    "surfaceDisabled": "#45475a",
+    "surfaceRaised": "#313244",
+    "text": "#cdd6f4",
+    "textFaint": "#6c7086",
+    "textMuted": "#a6adc8",
+    "warning": "#f9e2af"
+  },
+  "description": "Jarvis 深色主题（Catppuccin Mocha 配色收敛版）：三个界面共用的唯一颜色事实来源。",
+  "font": {
+    "mono": "monospace",
+    "sans": "system-ui",
+    "size": {
+      "lg": 16,
+      "md": 14,
+      "sm": 13,
+      "xs": 12
+    }
+  },
+  "name": "dark",
+  "radius": {
+    "md": 8,
+    "sm": 6
+  },
+  "spacing": {
+    "1": 4,
+    "2": 8,
+    "3": 12,
+    "4": 16
+  }
+}

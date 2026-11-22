@@ -67,6 +67,25 @@ class CheckpointStore:
     def list_checkpoints(self) -> list:
         return [dict(row) for row in self._manifest]
 
+    def _restore_row(self, row: dict):
+        """把 manifest 里的一行恢复回原文件，返回恢复的路径（失败返回 None）。"""
+        src = os.path.join(self.root, row["id"])
+        dest = row["path"]
+        try:
+            if os.path.isfile(src):
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                shutil.copy2(src, dest)
+                return dest
+            return None
+        except OSError:
+            return None
+        finally:
+            try:
+                if os.path.isfile(src):
+                    os.remove(src)
+            except OSError:
+                pass
+
     def rewind(self, steps: int = 1) -> list:
         """恢复最近 steps 次备份，返回恢复的文件路径列表。
 
@@ -78,17 +97,24 @@ class CheckpointStore:
             if not self._manifest:
                 break
             row = self._manifest.pop()
-            src = os.path.join(self.root, row["id"])
-            dest = row["path"]
-            try:
-                if os.path.isfile(src):
-                    os.makedirs(os.path.dirname(dest), exist_ok=True)
-                    shutil.copy2(src, dest)
-                    restored.append(dest)
-                if os.path.isfile(src):
-                    os.remove(src)
-            except OSError:
-                continue
+            dest = self._restore_row(row)
+            if dest:
+                restored.append(dest)
+        self._save_manifest()
+        return restored
+
+    def rewind_to(self, cutoff_iso: str) -> list:
+        """恢复到 cutoff 时刻的状态：弹出所有不早于 cutoff 的检查点并逐个
+        恢复（最新的先恢复），返回恢复的文件路径列表。消息不动——
+        悬停某条消息点“恢复检查点”时用这条消息的挂载时间当 cutoff，
+        文件回到那条消息出现之前（第一个不早于 cutoff 的检查点备份的
+        就是那一刻的内容），聊天记录原样保留。"""
+        restored = []
+        while self._manifest and self._manifest[-1].get("ts", "") >= cutoff_iso:
+            row = self._manifest.pop()
+            dest = self._restore_row(row)
+            if dest:
+                restored.append(dest)
         self._save_manifest()
         return restored
 
@@ -115,8 +141,16 @@ def current_store():
     return _CURRENT
 
 
-def snapshot_if_active(path: str) -> None:
-    """如果当前装了检查点库，备份 path 一次（供钩子注册时调用）。"""
+def snapshot_if_active(path: str):
+    """如果当前装了检查点库，备份 path 一次（供钩子注册时调用）。
+
+    返回写前钩子约定的 (ok, message)：备份失败也不拦写入。
+    之前这里返回 None，钩子调用方解包失败，直接把所有写文件拦了
+    （TUI 里会话一开就写不了文件，U5 修）。"""
     store = current_store()
     if store is not None:
-        store.snapshot(path)
+        try:
+            store.snapshot(path)
+        except Exception:
+            pass
+    return True, ""

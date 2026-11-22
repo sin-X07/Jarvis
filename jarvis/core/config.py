@@ -78,6 +78,12 @@ class JarvisConfig:
         self.daily_budget_usd = DEFAULT_DAILY_BUDGET_USD
         self.context_limit = DEFAULT_CONTEXT_LIMIT
         self.compaction_threshold = DEFAULT_COMPACTION_THRESHOLD
+        # 桌面 GUI 的窗口尺寸与分隔条位置（U3-5）：None = 第一次启动用默认。
+        self.window_width = 1100
+        self.window_height = 650
+        self.window_x = None
+        self.window_y = None
+        self.splitter_sizes = None
         for key, value in overrides.items():
             if not hasattr(self, key):
                 raise ValueError(f"没有这个配置项：{key}")
@@ -127,7 +133,9 @@ def save_config(config: JarvisConfig) -> str:
     data = {key: getattr(config, key)
             for key in ("model", "base_url", "max_steps", "timeout", "retry",
                         "shell_timeout", "permission", "max_budget_usd",
-                        "daily_budget_usd", "context_limit")
+                        "daily_budget_usd", "context_limit",
+                        "window_width", "window_height", "window_x",
+                        "window_y", "splitter_sizes")
             if hasattr(config, key)}
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -159,3 +167,26 @@ def load_config(overrides=None, env=None) -> JarvisConfig:
             raise ValueError(f"没有这个配置项：{key}")
         setattr(cfg, key, value)
     return cfg
+
+
+def has_api_key() -> bool:
+    """当前进程里有没有可用的 key（环境变量或 .env 已加载进 environ）。"""
+    return bool(os.environ.get('DEEPSEEK_API_KEY'))
+
+
+def save_key_to_dotenv(key: str, path: str) -> None:
+    """把 DEEPSEEK_API_KEY 写进 .env（有就改行，没有就追加）。
+
+    首次启动向导（GUI/TUI）用；测试传临时路径，不碰真 .env。
+    """
+    lines = []
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    lines = [ln for ln in lines
+             if not ln.strip().startswith("DEEPSEEK_API_KEY=")]
+    lines.append(f"DEEPSEEK_API_KEY={key.strip()}")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
