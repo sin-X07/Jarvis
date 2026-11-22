@@ -346,6 +346,9 @@ INDEX_HTML = """<!DOCTYPE html>
   #disconnect { background: var(--color-warning); color: var(--color-bg);
                 border-radius: 8px; padding: 8px 12px; margin: 8px 0;
                 display: flex; gap: 8px; align-items: center; font-size: 13px; }
+  /* hidden 属性会被上面的 display: flex 盖掉（作者样式优先于 UA 样式），
+     必须显式写 [hidden] 规则，否则横幅一打开就一直挂着（2026-11-22 真机事故）。 */
+  #disconnect[hidden] { display: none; }
   #disconnect button { background: var(--color-bg); color: var(--color-warning);
                 padding: 4px 12px; }
   /* 快捷键总览（U6-2） */
@@ -1085,7 +1088,7 @@ async function send(textOverride, opts) {
           const note = document.createElement('div');
           note.className = 'msg jarvis';
           note.textContent = payload.report
-            ? '验收检查：\n' + payload.report
+            ? '验收检查：\\n' + payload.report
             : '验收检查失败：' + (payload.error || '未知错误');
           chatEl.appendChild(note);
           chatEl.scrollTop = chatEl.scrollHeight;

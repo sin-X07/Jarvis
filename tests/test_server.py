@@ -13,6 +13,7 @@ FakeStreamClient 按剧本返回 chunk；TestClient 直接调 FastAPI 应用。
   9. 缺 key 的 400 也记一行日志（reason=missing_key）
   10. 空消息报 400
   11. 导入 server 不牵连 PySide6（网页版不依赖 GUI）
+  12. 下发的内联 JS 能解析、断线横幅有 [hidden] 规则（2026-11-22 真机事故回归）
 
 Run:  python test_server.py
 """
@@ -21,6 +22,9 @@ import contextlib
 import io
 import json
 import os
+import re
+import shutil
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -116,6 +120,43 @@ def test_index_empty_state_from_viewstate():
     assert EMPTY_TAGLINE in resp.text, resp.text[:500]
     assert EMPTY_HINTS[0] in resp.text, "空态文案未从 viewstate 注入"
     print("[OK] 网页版：空态文案来自 viewstate（与 TUI/GUI 同一份）")
+
+
+def test_index_inline_script_parses():
+    """下发的内联 JS 必须能解析：2026-11-22 真机事故回归。
+
+    U7 的 verify 处理里写了换行转义，但 INDEX_HTML 是普通三引号 Python
+    字符串，转义被 Python 吃成真换行，下发到浏览器的 JS 单引号字符串里
+    断行，整个 <script> 语法错误、全部监听器失效；同时 #disconnect 的
+    display: flex 盖掉了 hidden 属性，横幅一打开就挂着。两处都锁死。
+    """
+    client = _client_with([])
+    resp = client.get("/")
+    assert resp.status_code == 200
+    html = resp.text
+    # 1. 下发的 JS 里 verify 行必须是转义后的反斜杠 + n，不能是真换行
+    assert "'验收检查：\\n' + payload.report" in html, "JS 转义被 Python 吃了"
+    assert "'验收检查：\n' + payload.report" not in html, "JS 字符串里断行"
+    # 2. 断线横幅必须有 [hidden] 规则，否则 display: flex 会盖掉 hidden 属性
+    assert "#disconnect[hidden]" in html, "缺 #disconnect[hidden] 规则"
+    # 3. 有 node 时直接对下发的脚本做语法检查
+    m = re.search(r"<script>(.*?)</script>", html, re.S)
+    assert m, "页面里没有内联 <script>"
+    node = shutil.which("node")
+    if node is None:
+        print("[OK] 网页版：内联 JS 转义与横幅规则正常（本机无 node，未跑语法检查）")
+        return
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                     encoding="utf-8") as f:
+        f.write(m.group(1))
+        path = f.name
+    try:
+        proc = subprocess.run([node, "--check", path], capture_output=True,
+                              text=True, timeout=30)
+        assert proc.returncode == 0, proc.stderr
+    finally:
+        os.unlink(path)
+    print("[OK] 网页版：内联 JS 通过 node --check，横幅有 [hidden] 规则")
 
 
 def test_chat_stream_text():
@@ -540,6 +581,7 @@ if __name__ == "__main__":
     test_no_pyside()
     test_index_and_health()
     test_index_empty_state_from_viewstate()
+    test_index_inline_script_parses()
     test_chat_stream_text()
     test_chat_tool_call()
     test_chat_uses_provided_key()
