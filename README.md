@@ -182,6 +182,10 @@ Shell 先过危险命令黑名单和工作区检查，写操作要确认，输�
    `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` 不填就用默认值。
 3. Deploy。部署完打开给你的域名就能用。
    线上地址：https://jarvis-two-rho-72.vercel.app/
+   注意：`build/` 与 `dist/` 是 PyInstaller 产物，不进 git 也不进 Vercel
+   部署（见 `.gitignore` 与 `.vercelignore`）；exe 在本地用 `build-exe.ps1`
+   重新打。2026-11-22 它们一度被提交进仓库，导致函数 bundle 354.82 MB、
+   超 225 MB 上限，网页版部署失败。
 4. 限制要知道：免费版函数最长 60 秒（一轮对话如果调很多次工具可能超时）；
    `memory.json` 在 Vercel 上写不进磁盘，长期记忆靠浏览器 localStorage
    带着走；key 是访客自己的，但请求要经过你的服务器转发——服务器不存 key，

@@ -1,0 +1,14 @@
+# Vercel 部署时不需要的东西（函数只需要 api/、jarvis/、vercel.json、requirements.txt）。
+# 其中 build/ 与 dist/ 是 PyInstaller 产物（合计约 316 MB），曾被误提交进 git，
+# 是 2026-11-22 部署报 bundle 354.82 MB 超 225 MB 上限的直接原因。
+# 即使它们被重新追踪进 git，这里也能拦住，不再进部署包。
+build/
+dist/
+tests/
+docs/
+*.md
+*.ps1
+run_tests.py
+requirements-gui.txt
+__pycache__/
+*.pyc

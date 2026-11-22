@@ -3,3 +3,8 @@ memory.json
 .venv/
 __pycache__/
 *.pyc
+# PyInstaller 产物：本地重新打包即可，不要进仓库。
+# 2026-11-22 教训：build/ 与 dist/ 一度被提交进 git（约 316 MB），
+# 导致 Vercel 函数 bundle 354.82 MB，超 225 MB 上限、网页版无法部署。
+build/
+dist/
